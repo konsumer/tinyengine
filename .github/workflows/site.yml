@@ -16,6 +16,7 @@ jobs:
       - uses: emscripten-core/setup-emsdk@v11
       - name: Build Site
         run: |
+          pip3 install Pillow
           npm run gen:maps
           npm run build:web
           mkdir -p webroot
