@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no" />
+    <title>tinyengine demo</title>
+    <style>
+      html, body { margin: 0; height: 100%; background: #14131c; color: #cfcbe4; font: 13px/1.5 system-ui, sans-serif; }
+      body { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; }
+      /* The screen is 160x120, so scale it up with hard pixel edges rather than a blur. */
+      canvas { width: min(96vw, 640px); aspect-ratio: 4 / 3; image-rendering: pixelated; background: #000; touch-action: none; }
+      p { margin: 0; opacity: 0.7; }
+    </style>
+  </head>
+  <body>
+    <canvas id="canvas" tabindex="-1" oncontextmenu="event.preventDefault()"></canvas>
+    <p>Arrow keys to move, space to jump. Walk into a portal to change map.</p>
+    <script>
+      var Module = { canvas: document.getElementById('canvas') }
+      Module.canvas.focus()
+    </script>
+    {{{ SCRIPT }}}
+  </body>
+</html>

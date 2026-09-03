@@ -1,0 +1,130 @@
+{
+ "columns": 8,
+ "image": "tiles.png",
+ "imageheight": 24,
+ "imagewidth": 64,
+ "margin": 0,
+ "name": "tiles",
+ "spacing": 0,
+ "tilecount": 20,
+ "tiledversion": "1.11.0",
+ "tileheight": 8,
+ "tilewidth": 8,
+ "type": "tileset",
+ "version": "1.10",
+ "tiles": [
+  {
+   "id": 2,
+   "properties": [
+    {
+     "name": "solid",
+     "type": "bool",
+     "value": true
+    }
+   ]
+  },
+  {
+   "id": 4,
+   "properties": [
+    {
+     "name": "solid",
+     "type": "bool",
+     "value": true
+    }
+   ],
+   "animation": [
+    {
+     "duration": 600,
+     "tileid": 4
+    },
+    {
+     "duration": 600,
+     "tileid": 5
+    }
+   ]
+  },
+  {
+   "id": 6,
+   "properties": [
+    {
+     "name": "solid",
+     "type": "bool",
+     "value": true
+    }
+   ]
+  },
+  {
+   "id": 8,
+   "properties": [
+    {
+     "name": "platform",
+     "type": "bool",
+     "value": true
+    }
+   ]
+  },
+  {
+   "id": 9,
+   "properties": [
+    {
+     "name": "ladder",
+     "type": "bool",
+     "value": true
+    }
+   ]
+  },
+  {
+   "id": 10,
+   "properties": [
+    {
+     "name": "solid",
+     "type": "bool",
+     "value": true
+    }
+   ]
+  },
+  {
+   "id": 11,
+   "animation": [
+    {
+     "duration": 220,
+     "tileid": 11
+    },
+    {
+     "duration": 220,
+     "tileid": 12
+    }
+   ]
+  },
+  {
+   "id": 15,
+   "properties": [
+    {
+     "name": "solid",
+     "type": "bool",
+     "value": true
+    }
+   ]
+  },
+  {
+   "id": 16,
+   "properties": [
+    {
+     "name": "hazard",
+     "type": "bool",
+     "value": true
+    }
+   ]
+  },
+  {
+   "id": 19,
+   "properties": [
+    {
+     "name": "solid",
+     "type": "bool",
+     "value": true
+    }
+   ]
+  }
+ ]
+}

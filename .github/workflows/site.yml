@@ -1,0 +1,25 @@
+name: Publish Site
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  pages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: emscripten-core/setup-emsdk@v11
+      - name: Build Site
+        run: |
+          npm run gen:maps
+          npm run build:web
+          mkdir -p webroot
+          mv build-web/examples/demo/index.html webroot/
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: ./webroot

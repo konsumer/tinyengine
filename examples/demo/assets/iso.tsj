@@ -1,0 +1,77 @@
+{
+ "columns": 4,
+ "image": "iso.png",
+ "imageheight": 48,
+ "imagewidth": 64,
+ "margin": 0,
+ "name": "iso",
+ "spacing": 0,
+ "tilecount": 10,
+ "tiledversion": "1.11.0",
+ "tileheight": 16,
+ "tilewidth": 16,
+ "type": "tileset",
+ "version": "1.10",
+ "tiles": [
+  {
+   "id": 2,
+   "properties": [
+    {
+     "name": "solid",
+     "type": "bool",
+     "value": true
+    }
+   ]
+  },
+  {
+   "id": 3,
+   "properties": [
+    {
+     "name": "solid",
+     "type": "bool",
+     "value": true
+    }
+   ]
+  },
+  {
+   "id": 4,
+   "properties": [
+    {
+     "name": "solid",
+     "type": "bool",
+     "value": true
+    }
+   ],
+   "animation": [
+    {
+     "duration": 700,
+     "tileid": 4
+    },
+    {
+     "duration": 700,
+     "tileid": 5
+    }
+   ]
+  },
+  {
+   "id": 8,
+   "properties": [
+    {
+     "name": "anim",
+     "type": "string",
+     "value": "hopper"
+    }
+   ],
+   "animation": [
+    {
+     "duration": 320,
+     "tileid": 8
+    },
+    {
+     "duration": 320,
+     "tileid": 9
+    }
+   ]
+  }
+ ]
+}
