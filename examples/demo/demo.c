@@ -594,19 +594,32 @@ static void AudioClose(void) {
  * single threaded, so this can never run in the middle of a C frame -- which is exactly why
  * the engine can be a plain render function with no locking. Browsers start the context
  * suspended until a gesture, so a one-shot handler resumes it on the first key or click.
+ *
+ * The context is asked for the engine's rate, but a browser may refuse and give its own
+ * (usually 48000). Feeding 22050 samples into a 48000 context plays them ~2x fast -- which
+ * sounds high pitched and wrong -- so the sink resamples from ctx.sampleRate to the engine
+ * rate whenever the two disagree. At the requested rate the ratio is 1 and this is a copy.
  */
-EM_JS(void, demo_audio_open, (void), {
-  var ctx = new(window.AudioContext || window.webkitAudioContext)();
+EM_JS(void, demo_audio_open, (int rate), {
+  var ctx = new(window.AudioContext || window.webkitAudioContext)({sampleRate : rate});
+  var step = rate / ctx.sampleRate; /* engine frames per output frame */
   var node = ctx.createScriptProcessor(2048, 0, 1);
   node.onaudioprocess = function(event) {
     var out = event.outputBuffer.getChannelData(0);
     var frames = out.length;
+    /* One engine sample past the last needed output frame, so the interpolation has a pair. */
+    var need = Math.ceil(frames * step) + 1;
     var ptr = _demo_audio_buffer();
-    _demo_audio_fill(frames);
+    _demo_audio_fill(need);
     var heap = Module['HEAP16'] || HEAP16;
     var base = ptr >> 1;
     for (var i = 0; i < frames; i++) {
-      out[i] = heap[base + i] / 32768.0;
+      var position = i * step;
+      var index = position | 0;
+      var frac = position - index;
+      var a = heap[base + index];
+      var b = heap[base + index + 1];
+      out[i] = (a + (b - a) * frac) / 32768.0;
     }
   };
   var source = ctx.createBufferSource();
@@ -617,7 +630,9 @@ EM_JS(void, demo_audio_open, (void), {
   document.addEventListener('pointerdown', function() { ctx.resume(); }, {once : true});
 });
 
-static int16_t web_audio_buffer[2048];
+/* Big enough for a worst-case low-rate context: 2048 output frames at 8000Hz wants 5645. */
+#define WEB_AUDIO_BUFFER 8192
+static int16_t web_audio_buffer[WEB_AUDIO_BUFFER];
 static tiny_game* web_game;
 
 EMSCRIPTEN_KEEPALIVE int16_t* demo_audio_buffer(void) { return web_audio_buffer; }
@@ -631,7 +646,7 @@ EMSCRIPTEN_KEEPALIVE void demo_audio_fill(int frames) {
 
 static void AudioInit(tiny_game* game) {
   web_game = game;
-  demo_audio_open();
+  demo_audio_open(TINY_AUDIO_RATE);
 }
 
 static void AudioPump(tiny_game* game, float dt) {
