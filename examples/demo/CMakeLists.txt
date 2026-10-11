@@ -22,6 +22,9 @@ elseif(TINYENGINE_BUILD_EXAMPLE_RAYLIB)
     target_link_libraries(demo PRIVATE raylib pntr pntr_app tinyengine)
 endif()
 
+# all images are inlined (so it will work on ESP32) so no need for this
+add_compile_definitions(PNTR_NO_LOAD_IMAGE)
+
 if(TARGET demo)
     target_include_directories(demo PRIVATE ${DEMO_DIR})
     set_property(TARGET demo PROPERTY C_STANDARD 11)
