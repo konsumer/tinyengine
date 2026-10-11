@@ -73,6 +73,33 @@ void pntr_app_log_ex(pntr_app_log_type type, const char* message, ...) {
   pntr_app_log(type, buffer);
 }
 
+/*
+ * pntr_app_sfx is compiled in by demo.c, and it synthesises with pntr_app's random numbers.
+ * A fixed seed keeps a headless run reproducible, which is the point of this tool.
+ */
+int pntr_app_random(pntr_app* app, int min, int max) {
+  (void)app;
+  static uint64_t seed = 0x9E3779B97F4A7C15ull;
+  seed = seed * 6364136223846793005ull + 1442695040888963407ull;
+  if (max <= min) {
+    return min;
+  }
+  return min + (int)((seed >> 33) % (uint64_t)(max - min));
+}
+
+float pntr_app_random_float(pntr_app* app, float min, float max) {
+  (void)app;
+  return min + (max - min) * (float)pntr_app_random(NULL, 0, 1 << 20) / (float)(1 << 20);
+}
+
+/* pntr_app_sfx_sound() builds a pntr_sound, which needs a backend this tool does not have. */
+pntr_sound* pntr_load_sound_from_memory(pntr_app_sound_type type, unsigned char* data, unsigned int dataSize) {
+  (void)type;
+  (void)data;
+  (void)dataSize;
+  return NULL;
+}
+
 /*-- the game -----------------------------------------------------------------------------*/
 
 #define DEMO_HEADLESS
@@ -235,6 +262,38 @@ int main(int argc, char* argv[]) {
     fprintf(stderr, "tiny_preview: the frame is flat, so the map did not render\n");
     return 1;
   }
+
+  /*
+   * Audio smoke. The mixer is the engine's job, so prove it actually makes noise: a one-shot
+   * WAV has to reach the output and then stop, a MOD has to keep looping, and a synthesised
+   * SFX has to come out of pntr_app_sfx. Silence here means a whole subsystem is wired wrong.
+   */
+  int16_t audio[512];
+  long loud = 0;
+  tiny_sound_play(game, "theme", true);
+  tiny_sound_play(game, "coin", false);
+  tiny_sound_play(game, "laser", false);
+  for (int block = 0; block < 40; block++) {
+    tiny_audio_render(game, audio, 512);
+    for (int i = 0; i < (int)(sizeof(audio) / sizeof(audio[0])); i++) {
+      if (audio[i] != 0) {
+        loud++;
+      }
+    }
+  }
+  if (loud == 0) {
+    fprintf(stderr, "tiny_preview: the mixer produced nothing but silence\n");
+    return 1;
+  }
+  if (!tiny_sound_playing(game, "theme")) {
+    fprintf(stderr, "tiny_preview: the looping MOD stopped on its own\n");
+    return 1;
+  }
+  if (tiny_sound_playing(game, "coin")) {
+    fprintf(stderr, "tiny_preview: the one-shot WAV never stopped\n");
+    return 1;
+  }
+  printf("tiny_preview: audio -- %ld non-silent samples, theme looping, coin one-shot done\n", loud);
 
   app.close(&app);
   pntr_unload_image(screen);

@@ -13,6 +13,8 @@ no PSRAM can actually allocate.
 
 import json
 import os
+import struct
+import wave
 
 from PIL import Image, ImageDraw
 
@@ -835,6 +837,76 @@ def main():
   for name, builder in (('town', make_town), ('cave', make_cave), ('ledge', make_ledge),
                         ('arena', make_arena), ('pyramid', make_pyramid), ('sky', make_sky)):
     write_json(os.path.join(HERE, '%s.tmj' % name), builder())
+
+  make_sounds()
+
+
+# ---------------------------------------------------------------------------------------------
+# Sound: baked WAV blips and one SfxParams, authored here so the demo needs no sample files
+# checked in, the same way it needs no PNGs. theme.mod is the exception: it is a real
+# ProTracker module, not something this script can draw.
+# ---------------------------------------------------------------------------------------------
+
+SOUND_RATE = 22050
+
+
+def write_wav(name, samples):
+  """Write mono 16 bit PCM. tiny_bake.py decodes it back to raw samples at bake time."""
+  path = os.path.join(HERE, name)
+  with wave.open(path, 'wb') as handle:
+    handle.setnchannels(1)
+    handle.setsampwidth(2)
+    handle.setframerate(SOUND_RATE)
+    handle.writeframes(struct.pack('<%dh' % len(samples), *samples))
+  print('wrote %s (%d samples)' % (name, len(samples)))
+
+
+def sweep(seconds, freq_from, freq_to, volume=0.5, duty=0.5):
+  """A square wave sweeping between two frequencies. Enough for every blip in the demo."""
+  count = int(SOUND_RATE * seconds)
+  out = []
+  phase = 0.0
+  for i in range(count):
+    t = i / float(max(1, count - 1))
+    phase += (freq_from + (freq_to - freq_from) * t) / float(SOUND_RATE)
+    value = volume if (phase % 1.0) < duty else -volume
+    # Short fades at both ends, so nothing clicks at the start or the stop.
+    fade = min(1.0, i / 40.0, (count - i) / 80.0)
+    out.append(int(value * fade * 32767.0))
+  return out
+
+
+def write_sfx(name, **fields):
+  """An rFXGen .sfs file: an `rFX ` header and the 96 byte SfxParams payload pntr_app_sfx reads."""
+  params = {
+    'randSeed': 0, 'waveType': 0,  # square
+    'attackTime': 0.0, 'sustainTime': 0.05, 'sustainPunch': 0.3, 'decayTime': 0.15,
+    'startFrequency': 0.9, 'minFrequency': 0.0, 'slide': -0.2, 'deltaSlide': 0.0,
+    'vibratoDepth': 0.2, 'vibratoSpeed': 0.5, 'changeAmount': 0.0, 'changeSpeed': 0.0,
+    'squareDuty': 0.5, 'dutySweep': 0.0, 'repeatSpeed': 0.0, 'phaserOffset': 0.0,
+    'phaserSweep': 0.0, 'lpfCutoff': 1.0, 'lpfCutoffSweep': 0.0, 'lpfResonance': 0.0,
+    'hpfCutoff': 0.0, 'hpfCutoffSweep': 0.0
+  }
+  params.update(fields)
+  payload = struct.pack('<Ii', params['randSeed'], params['waveType'])
+  for key in ('attackTime', 'sustainTime', 'sustainPunch', 'decayTime', 'startFrequency',
+              'minFrequency', 'slide', 'deltaSlide', 'vibratoDepth', 'vibratoSpeed',
+              'changeAmount', 'changeSpeed', 'squareDuty', 'dutySweep', 'repeatSpeed',
+              'phaserOffset', 'phaserSweep', 'lpfCutoff', 'lpfCutoffSweep', 'lpfResonance',
+              'hpfCutoff', 'hpfCutoffSweep'):
+    payload += struct.pack('<f', params[key])
+  path = os.path.join(HERE, name)
+  with open(path, 'wb') as handle:
+    handle.write(b'rFX ' + struct.pack('<hh', 200, len(payload)) + payload)
+  print('wrote %s (%d bytes)' % (name, len(payload) + 8))
+
+
+def make_sounds():
+  write_wav('coin.wav', sweep(0.10, 988, 1319))
+  write_wav('jump.wav', sweep(0.14, 330, 660, volume=0.45))
+  write_wav('hurt.wav', sweep(0.22, 440, 110, volume=0.5))
+  write_wav('blip.wav', sweep(0.05, 1568, 1568, volume=0.35))
+  write_sfx('laser.sfs')
 
 
 if __name__ == '__main__':

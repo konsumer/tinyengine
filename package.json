@@ -2,7 +2,7 @@
 	"scripts": {
 		"build:web": "emcmake cmake -DCMAKE_BUILD_TYPE=Release -B build-web && cmake --build build-web -t demo",
 		"build:native": "npm run gen:maps && cmake -DCMAKE_BUILD_TYPE=Release -B build && cmake --build build",
-		"gen:maps": "npx -y rimraf examples/demo/generated/ && python3 tools/tiny_bake.py examples/demo/assets/*.tmj -o examples/demo/generated/",
+		"gen:maps": "npx -y rimraf examples/demo/generated/ && python3 tools/tiny_bake.py examples/demo/assets/*.tmj -o examples/demo/generated/ --sounds 'examples/demo/assets/*.wav' 'examples/demo/assets/*.mod' 'examples/demo/assets/*.sfs'",
 		"native": "npm run build:native && ./build/examples/demo/demo",
 		"web:server": "npx -y live-server build-web/examples/demo",
 		"web:watch": "npx -y nodemon -- -e c,h,html --watch examples/demo --exec 'npm run build:web'",

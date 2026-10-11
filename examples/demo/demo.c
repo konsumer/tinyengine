@@ -31,6 +31,12 @@
 #endif
 #include "pntr_app.h"
 
+/* The procedural sfx synth. tinyengine plays a baked SfxParams through it, and only if this
+   header was included first: the engine checks for PNTR_APP_SFX_H__ before it uses it. */
+#define PNTR_ENABLE_MATH
+#define PNTR_APP_SFX_IMPLEMENTATION
+#include "pntr_app_sfx.h"
+
 #define TINY_ENGINE_IMPLEMENTATION
 #include "tinyengine.h"
 
@@ -112,6 +118,7 @@ static void PlayerPlatformer(tiny_game* game, tiny_object* self, float dt) {
     if (self->on_ground && JumpPressed(game)) {
       self->vy = -JUMP_SPEED;
       self->on_ground = false;
+      tiny_sound_play(game, "jump", false);
     }
     /* tiny_step applies the map's gravity and slides along whatever it hits. */
     tiny_step(game, self, dt);
@@ -141,6 +148,7 @@ static void PlayerPlatformer(tiny_game* game, tiny_object* self, float dt) {
   bool burned = (tiny_flags_at(game, tx, ty) & TINY_TILE_HAZARD) != 0;
   if (burned || self->y > (float)(game->map->height * game->map->tile_h)) {
     tiny_goto_map(game, game->map->name, "from_town");
+    tiny_sound_play(game, "hurt", false);
     Say(game, "ouch");
   }
 }
@@ -276,6 +284,7 @@ void Behaviour(tiny_game* game, tiny_object* self, float dt) {
   if (tiny_is(self, "enemy")) {
     Patrol(game, self, dt);
     if (tiny_overlaps(self, game->player)) {
+      tiny_sound_play(game, "hurt", false);
       Say(game, "bumped an enemy");
     }
     return;
@@ -284,6 +293,7 @@ void Behaviour(tiny_game* game, tiny_object* self, float dt) {
   if (tiny_is(self, "ghost")) {
     Chase(game, self, dt);
     if (tiny_overlaps(self, game->player)) {
+      tiny_sound_play(game, "laser", false);
       Say(game, "caught!");
     }
     return;
@@ -294,6 +304,7 @@ void Behaviour(tiny_game* game, tiny_object* self, float dt) {
     self->y += sinf(game->time * 4.0f + (float)self->def->id) * 4.0f * dt;
     if (tiny_overlaps(self, game->player)) {
       state->score += tiny_is(self, "coin") ? 10 : 1;
+      tiny_sound_play(game, "coin", false);
       tiny_kill(game, self);
     }
     return;
@@ -314,6 +325,7 @@ void Behaviour(tiny_game* game, tiny_object* self, float dt) {
       const char* destination = tiny_obj_str(self, "destination", NULL);
       if (destination != NULL) {
         tiny_goto_map(game, destination, tiny_obj_str(self, "spawn", NULL));
+        tiny_sound_play(game, "blip", false);
       }
       self->state = PORTAL_BLOCKED;
     }
@@ -341,6 +353,10 @@ void Enter(tiny_game* game) {
   DemoState* state = (DemoState*)game->user;
   state->message = game->map->name;
   state->message_timer = 1.5f;
+  /* One loop of the theme for the whole run, not one per map. */
+  if (!tiny_sound_playing(game, "theme")) {
+    tiny_sound_play(game, "theme", true);
+  }
 }
 
 /*
@@ -461,6 +477,8 @@ static const tiny_game_def DEMO = {
     .maps = TINY_MAPS,
     .map_count = TINY_MAP_COUNT,
     .start_map = "town",
+    .sounds = TINY_SOUNDS,
+    .sound_count = TINY_SOUND_COUNT,
     .object = Behaviour,
     .enter = Enter,
     .leave = NULL,
@@ -470,6 +488,201 @@ typedef struct AppData {
   tiny_game* game;
   DemoState state;
 } AppData;
+
+/*--------------------------------------------------------------------------------------------
+ * Audio output.
+ *
+ * tinyengine mixes mono int16 at TINY_AUDIO_RATE and hands it over with tiny_audio_render().
+ * Everything below is the sink -- the only part that knows what hardware exists. Swapping a
+ * target means replacing one of these blocks and nothing else in the engine or the game.
+ *------------------------------------------------------------------------------------------*/
+
+#if defined(DEMO_HEADLESS) || \
+    !(defined(PNTR_APP_RAYLIB) || defined(PNTR_APP_WEB) || defined(PNTR_APP_ESP32))
+/* No device, or running headless. The mixer still works; the samples just go nowhere. */
+static void AudioInit(tiny_game* game) { (void)game; }
+static void AudioPump(tiny_game* game, float dt) {
+  (void)game;
+  (void)dt;
+}
+static void AudioClose(void) {}
+
+#elif defined(PNTR_APP_RAYLIB)
+/*
+ * raylib's buffer-push API (UpdateAudioStream) writes a whole sub-buffer at a time and zero
+ * pads the rest, and its sub-buffer size is `max(default, device period)`, which differs
+ * per machine. Pushing anything short of that chops the audio into silence-gaps and sounds
+ * like heavy distortion. The stream callback avoids the whole problem: raylib asks for an
+ * exact frame count whenever it needs one.
+ *
+ * That callback runs on the audio thread, so it must not touch engine state while the game
+ * thread is updating it. So the game thread renders into a small ring and the callback only
+ * drains it. One producer, one consumer, no locks.
+ */
+#define AUDIO_BLOCK 1024 /* frames rendered per pass */
+#define AUDIO_RING 4096  /* power of two, comfortably more than a device period */
+#define AUDIO_PREFILL (AUDIO_BLOCK * 2)
+
+static AudioStream audio_stream;
+static bool audio_ready;
+static int16_t audio_ring[AUDIO_RING];
+static int16_t audio_scratch[AUDIO_BLOCK];
+static volatile uint32_t audio_head; /* written by the game thread */
+static volatile uint32_t audio_tail; /* written by the audio thread */
+
+static void AudioFill(void* buffer, unsigned int frames) {
+  int16_t* out = (int16_t*)buffer;
+  /* The head is only ever advanced, so this stays correct across uint32 wrap. */
+  uint32_t available = audio_head - audio_tail;
+#if defined(__GNUC__)
+  __sync_synchronize();
+#endif
+  uint32_t count = frames < available ? frames : available;
+  for (uint32_t i = 0; i < count; i++) {
+    out[i] = audio_ring[(audio_tail + i) & (AUDIO_RING - 1)];
+  }
+  for (unsigned int i = count; i < frames; i++) {
+    out[i] = 0;
+  }
+  audio_tail += count;
+}
+
+static void AudioInit(tiny_game* game) {
+  (void)game;
+  audio_stream = LoadAudioStream(TINY_AUDIO_RATE, 16, 1);
+  /* raylib no-ops on an invalid stream, so there is nothing to test here. */
+  audio_ready = true;
+  SetAudioStreamCallback(audio_stream, AudioFill);
+  PlayAudioStream(audio_stream);
+}
+
+static void AudioPump(tiny_game* game, float dt) {
+  (void)dt;
+  if (!audio_ready) {
+    return;
+  }
+  /* Top the ring up to the prefill, and no further: bounded work per frame, bounded latency. */
+  uint32_t buffered = audio_head - audio_tail;
+  uint32_t want = AUDIO_PREFILL > buffered ? AUDIO_PREFILL - buffered : 0;
+  while (want > 0) {
+    uint32_t chunk = want < AUDIO_BLOCK ? want : AUDIO_BLOCK;
+    tiny_audio_render(game, audio_scratch, (int)chunk);
+    for (uint32_t i = 0; i < chunk; i++) {
+      audio_ring[(audio_head + i) & (AUDIO_RING - 1)] = audio_scratch[i];
+    }
+#if defined(__GNUC__)
+    __sync_synchronize();
+#endif
+    audio_head += chunk;
+    want -= chunk;
+  }
+}
+
+static void AudioClose(void) {
+  if (audio_ready) {
+    StopAudioStream(audio_stream);
+    UnloadAudioStream(audio_stream);
+  }
+  audio_ready = false;
+}
+
+#elif defined(PNTR_APP_WEB)
+#include <emscripten.h>
+
+/*
+ * A ScriptProcessorNode pulls a block from the engine on every audio callback. JavaScript is
+ * single threaded, so this can never run in the middle of a C frame -- which is exactly why
+ * the engine can be a plain render function with no locking. Browsers start the context
+ * suspended until a gesture, so a one-shot handler resumes it on the first key or click.
+ */
+EM_JS(void, demo_audio_open, (void), {
+  var ctx = new(window.AudioContext || window.webkitAudioContext)();
+  var node = ctx.createScriptProcessor(2048, 0, 1);
+  node.onaudioprocess = function(event) {
+    var out = event.outputBuffer.getChannelData(0);
+    var frames = out.length;
+    var ptr = _demo_audio_buffer();
+    _demo_audio_fill(frames);
+    var heap = Module['HEAP16'] || HEAP16;
+    var base = ptr >> 1;
+    for (var i = 0; i < frames; i++) {
+      out[i] = heap[base + i] / 32768.0;
+    }
+  };
+  var source = ctx.createBufferSource();
+  source.connect(node);
+  node.connect(ctx.destination);
+  source.start(0);
+  document.addEventListener('keydown', function() { ctx.resume(); }, {once : true});
+  document.addEventListener('pointerdown', function() { ctx.resume(); }, {once : true});
+});
+
+static int16_t web_audio_buffer[2048];
+static tiny_game* web_game;
+
+EMSCRIPTEN_KEEPALIVE int16_t* demo_audio_buffer(void) { return web_audio_buffer; }
+
+EMSCRIPTEN_KEEPALIVE void demo_audio_fill(int frames) {
+  if (frames > (int)(sizeof(web_audio_buffer) / sizeof(web_audio_buffer[0]))) {
+    frames = (int)(sizeof(web_audio_buffer) / sizeof(web_audio_buffer[0]));
+  }
+  tiny_audio_render(web_game, web_audio_buffer, frames);
+}
+
+static void AudioInit(tiny_game* game) {
+  web_game = game;
+  demo_audio_open();
+}
+
+static void AudioPump(tiny_game* game, float dt) {
+  (void)game;
+  (void)dt;
+}
+static void AudioClose(void) {}
+
+#elif defined(PNTR_APP_ESP32)
+/*
+ * The CYD's speaker port is a plain GPIO DAC, so this bit-bangs it from its own task. The
+ * pacing is the sample count, because Arduino's tick is far coarser than one audio block.
+ */
+#include <Arduino.h>
+
+#define TINY_SPEAKER_PIN 26
+#define AUDIO_BLOCK 256
+
+static tiny_game* esp_game;
+static TaskHandle_t audio_task_handle;
+
+static void AudioTask(void* argument) {
+  (void)argument;
+  int16_t block[AUDIO_BLOCK];
+  for (;;) {
+    tiny_audio_render(esp_game, block, AUDIO_BLOCK);
+    for (int i = 0; i < AUDIO_BLOCK; i++) {
+      dacWrite(TINY_SPEAKER_PIN, (uint8_t)((block[i] >> 8) + 128));
+    }
+    delayMicroseconds(1000000 * AUDIO_BLOCK / TINY_AUDIO_RATE);
+  }
+}
+
+static void AudioInit(tiny_game* game) {
+  esp_game = game;
+  xTaskCreatePinnedToCore(AudioTask, "tiny_audio", 4096, NULL, 1, &audio_task_handle, 1);
+}
+
+static void AudioPump(tiny_game* game, float dt) {
+  (void)game;
+  (void)dt;
+}
+
+static void AudioClose(void) {
+  if (audio_task_handle != NULL) {
+    vTaskDelete(audio_task_handle);
+    audio_task_handle = NULL;
+  }
+}
+
+#endif
 
 bool Init(pntr_app* app) {
   AppData* data = (AppData*)pntr_load_memory(sizeof(AppData));
@@ -485,6 +698,7 @@ bool Init(pntr_app* app) {
   if (data->game == NULL) {
     return false;
   }
+  AudioInit(data->game);
   return true;
 }
 
@@ -501,6 +715,7 @@ bool Update(pntr_app* app, pntr_image* screen) {
 
   tiny_update(data->game, dt);
   tiny_draw(data->game, screen);
+  AudioPump(data->game, dt);
   return true;
 }
 
@@ -509,6 +724,7 @@ void Close(pntr_app* app) {
   if (data == NULL) {
     return;
   }
+  AudioClose();
   tiny_unload(data->game);
   pntr_unload_font(data->state.font);
   pntr_unload_memory(data);

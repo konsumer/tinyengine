@@ -44,6 +44,21 @@ extern "C" {
 #define TINY_MAX_OBJECTS 96
 #endif
 
+#ifndef TINY_AUDIO_RATE
+/**
+ * The mixer's sample rate, and what the platform's audio sink must be opened at.
+ *
+ * Bake WAV audio with `tiny_bake.py --sound-rate` set to the same number, so the mixer
+ * reads samples at their own rate and never has to resample.
+ */
+#define TINY_AUDIO_RATE 22050
+#endif
+
+#ifndef TINY_MAX_VOICES
+/** PCM and SFX sounds that can play at once. A MOD uses the one music slot, not a voice. */
+#define TINY_MAX_VOICES 8
+#endif
+
 /*--------------------------------------------------------------------------------------------
  * Baked data: everything below here is what tiny_bake.py emits, and it is all const.
  *------------------------------------------------------------------------------------------*/
@@ -223,6 +238,27 @@ typedef struct tiny_map {
   tiny_props props;
 } tiny_map;
 
+/** How a baked sound is played. */
+typedef enum tiny_sound_kind {
+  TINY_SOUND_PCM = 0, /** Raw mono PCM from a WAV. The mixer reads it straight out of flash. */
+  TINY_SOUND_MOD,     /** ProTracker module bytes, played by the vendored micromod. */
+  TINY_SOUND_SFX      /** A 96 byte SfxParams, synthesised once by pntr_app_sfx. */
+} tiny_sound_kind;
+
+/**
+ * One baked sound. Everything it points at is `static const` flash, so the engine copies
+ * nothing and decodes nothing: a PCM sound is mixed out of .rodata as it stands.
+ */
+typedef struct tiny_sound {
+  const char* name;
+  uint32_t hash;
+  uint8_t kind;     /** tiny_sound_kind */
+  uint8_t bits;     /** PCM: 8 or 16 bits per sample. 0 for MOD and SFX. */
+  uint16_t rate;    /** PCM: samples per second. 0 for MOD and SFX, which have their own. */
+  const void* data; /** PCM samples, module bytes, or SfxParams bytes. */
+  uint32_t size;    /** Bytes in `data`. */
+} tiny_sound;
+
 /*--------------------------------------------------------------------------------------------
  * Runtime state: this is the part that lives in RAM.
  *------------------------------------------------------------------------------------------*/
@@ -283,6 +319,22 @@ typedef struct tiny_camera {
 typedef struct tiny_game tiny_game;
 
 /**
+ * One mixer voice: a PCM or SFX sound being played. A MOD uses the single music slot
+ * instead, because micromod is a whole-song player rather than a sample.
+ */
+typedef struct tiny_voice {
+  const tiny_sound* sound;
+  const void* samples; /** PCM source: flash for a WAV, heap for a generated SFX. */
+  void* owned;         /** Heap block to free when the voice ends, or NULL. */
+  uint32_t count;      /** Samples in `samples`. */
+  uint32_t position;   /** Read cursor, 16.16 fixed point, so a differing rate resamples. */
+  uint32_t step;       /** 16.16 advance per output frame. */
+  uint8_t bits;
+  bool loop;
+  bool active;
+} tiny_voice;
+
+/**
  * The game you are writing.
  *
  * Only `object` is required. It runs once per live object per frame, and inside it you can
@@ -292,6 +344,9 @@ typedef struct tiny_game_def {
   const tiny_map* const* maps;
   uint16_t map_count;
   const char* start_map; /** NULL starts on maps[0]. */
+
+  const tiny_sound* sounds; /** The baked sound bank. NULL when the game has no sound. */
+  uint16_t sound_count;
 
   /** Behaviour. Called for every active object, every frame. */
   void (*object)(tiny_game* game, tiny_object* self, float dt);
@@ -316,6 +371,14 @@ struct tiny_game {
   float gravity;   /** World units per second squared. Seeded from the map's `gravity`. */
   float time;      /** Seconds since the map was entered. */
   float anim_time; /** Clock the tile animations run on, so identical tiles stay in step. */
+
+  const tiny_sound* sounds; /** Copied from the game definition. */
+  uint16_t sound_count;
+  tiny_voice voices[TINY_MAX_VOICES];
+  const tiny_sound* music; /** The playing MOD, or NULL. micromod holds only one at a time. */
+  bool music_loop;
+  uint32_t music_played; /** Output frames since the module started. */
+  uint32_t music_length; /** Samples in one pass of the module, so a non-loop can stop. */
 
   pntr_app* app; /** Set by tiny_init(), so behaviour code can read input. */
   void* user;    /** Yours. */
@@ -386,6 +449,34 @@ TINY_API bool tiny_overlaps(const tiny_object* a, const tiny_object* b);
 
 /** The nearest overlapping object of a class, or NULL. Pass NULL for `type` to match any. */
 TINY_API tiny_object* tiny_overlapping(tiny_game* game, const tiny_object* obj, const char* type);
+
+/* -- sound ------------------------------------------------------------------------------ */
+
+/**
+ * Start a baked sound. Returns false when there is no such sound.
+ *
+ * A PCM (WAV) or SFX sound takes a mixer voice, so several can sound at once. A MOD takes
+ * the one music slot: starting a second module replaces the first. `loop` keeps it going.
+ */
+TINY_API bool tiny_sound_play(tiny_game* game, const char* name, bool loop);
+
+/** Stop a sound: its voice, or the music slot. Does nothing when it is not playing. */
+TINY_API void tiny_sound_stop(tiny_game* game, const char* name);
+
+/** Whether a sound is playing right now. */
+TINY_API bool tiny_sound_playing(tiny_game* game, const char* name);
+
+/**
+ * Fill `frames` mono int16 samples at TINY_AUDIO_RATE. The platform's audio sink calls this.
+ *
+ * This is the whole audio output: the engine never opens a device itself. On the web the
+ * sink is a ScriptProcessorNode, on the desktop an AudioStream, and on an ESP32 an I2S
+ * channel -- any of them can be swapped for another without touching the engine.
+ */
+TINY_API void tiny_audio_render(tiny_game* game, int16_t* samples, int frames);
+
+/** Whether anything is playing, so a sink can push silence instead of mixing. */
+TINY_API bool tiny_audio_active(tiny_game* game);
 
 /* -- animation -------------------------------------------------------------------------- */
 
@@ -499,6 +590,20 @@ extern "C" {
 
 #include <math.h>
 
+#ifndef TINY_NO_MOD
+/*
+ * micromod, vendored. Including the .c here is what keeps tinyengine a single header: the
+ * consumer compiles one translation unit and gets the MOD player with it. It allocates
+ * nothing, so it costs no heap -- just the module it reads out of flash.
+ */
+#include "micromod.c"
+#endif
+
+#ifndef PNTR_FREE
+#define PNTR_FREE(ptr) free(ptr)
+#include <stdlib.h>
+#endif
+
 #ifndef TINY_NO_STDIO
 #include <stdarg.h>
 #include <stdio.h>
@@ -523,6 +628,9 @@ static void _tiny_log(pntr_app_log_type type, const char* format, ...) {
 
 /* How many tiles past the view to still consider, for images that overhang their own cell. */
 #define TINY_CULL_MARGIN 4
+
+/* Output frames mixed at a time, so the mixer's accumulator stays off the deep end of the stack. */
+#define TINY_AUDIO_CHUNK 256
 
 uint32_t tiny_hash(const char* text) {
   uint32_t hash = 2166136261u;
@@ -1127,6 +1235,265 @@ static uint16_t _tiny_resolve_tile(tiny_game* game, uint16_t tile) {
   return anim->frames[anim->count - 1].tile;
 }
 
+/*-- sound ----------------------------------------------------------------------------------*/
+
+static const tiny_sound* _tiny_find_sound(tiny_game* game, const char* name) {
+  if (game == NULL || name == NULL || game->sounds == NULL) {
+    return NULL;
+  }
+  uint32_t hash = tiny_hash(name);
+  for (uint16_t i = 0; i < game->sound_count; i++) {
+    const tiny_sound* sound = &game->sounds[i];
+    if (sound->hash == hash && TINY_STRCMP(sound->name, name) == 0) {
+      return sound;
+    }
+  }
+  return NULL;
+}
+
+static int16_t _tiny_voice_sample(const tiny_voice* voice, uint32_t index) {
+  if (index >= voice->count) {
+    return 0;
+  }
+  if (voice->bits == 8) {
+    /* Baked 8 bit audio is unsigned, the way a WAV stores it. */
+    return (int16_t)(((int16_t)((const uint8_t*)voice->samples)[index] - 128) << 8);
+  }
+  return ((const int16_t*)voice->samples)[index];
+}
+
+/* A generated SFX is 44100Hz mono int16, whatever the mixer runs at; resample on the fly. */
+static uint32_t _tiny_voice_step(uint16_t rate) {
+  if (rate == 0) {
+    rate = TINY_AUDIO_RATE;
+  }
+  return (uint32_t)(((uint64_t)rate << 16) / (uint64_t)TINY_AUDIO_RATE);
+}
+
+static void _tiny_voice_stop(tiny_voice* voice) {
+  if (voice->owned != NULL) {
+    PNTR_FREE(voice->owned);
+  }
+  TINY_MEMSET(voice, 0, sizeof(tiny_voice));
+}
+
+static bool _tiny_start_voice(tiny_game* game, const tiny_sound* sound, bool loop) {
+  tiny_voice* voice = NULL;
+  for (int i = 0; i < TINY_MAX_VOICES; i++) {
+    if (!game->voices[i].active) {
+      voice = &game->voices[i];
+      break;
+    }
+  }
+  if (voice == NULL) {
+#ifndef TINY_NO_STDIO
+    _tiny_log(PNTR_APP_LOG_WARNING, "tinyengine: no free voice for '%s', raise TINY_MAX_VOICES", sound->name);
+#endif
+    return false;
+  }
+  _tiny_voice_stop(voice);
+  voice->sound = sound;
+  voice->loop = loop;
+  voice->active = true;
+
+  if (sound->kind == TINY_SOUND_SFX) {
+#ifdef PNTR_APP_SFX_H__
+    SfxSynth* synth = pntr_app_sfx_alloc_synth(SFX_I16, 44100, 10);
+    if (synth == NULL) {
+      voice->active = false;
+      return false;
+    }
+    SfxParams params;
+    TINY_MEMSET(&params, 0, sizeof(params));
+    TINY_MEMCPY(&params, sound->data, sound->size < sizeof(params) ? sound->size : sizeof(params));
+    int count = pntr_app_sfx_generate_wave(game->app, synth, &params);
+    if (count <= 0) {
+      PNTR_FREE(synth);
+      voice->active = false;
+      return false;
+    }
+    voice->samples = synth->samples.i16;
+    voice->owned = synth;
+    voice->bits = 16;
+    voice->count = (uint32_t)count;
+    voice->step = _tiny_voice_step(44100);
+#else
+    /* The application did not compile pntr_app_sfx, so a baked SFX has nothing to play it. */
+    voice->active = false;
+#ifndef TINY_NO_STDIO
+    _tiny_log(PNTR_APP_LOG_WARNING, "tinyengine: '%s' is an SFX; #include pntr_app_sfx.h to play it", sound->name);
+#endif
+    return false;
+#endif
+  } else {
+    voice->samples = sound->data;
+    voice->bits = sound->bits;
+    voice->count = sound->size / (sound->bits == 8 ? 1u : 2u);
+    voice->step = _tiny_voice_step(sound->rate);
+  }
+  return true;
+}
+
+static void _tiny_mix_voices(tiny_game* game, int32_t* mix, int frames) {
+  for (int v = 0; v < TINY_MAX_VOICES; v++) {
+    tiny_voice* voice = &game->voices[v];
+    if (!voice->active) {
+      continue;
+    }
+    for (int i = 0; i < frames; i++) {
+      uint32_t index = voice->position >> 16;
+      if (index >= voice->count) {
+        if (!voice->loop || voice->count == 0) {
+          _tiny_voice_stop(voice);
+          break;
+        }
+        /* Wrap on the sample index rather than `count << 16`, which overflows past 65535. */
+        index %= voice->count;
+        voice->position = (index << 16) | (voice->position & 0xFFFFu);
+      }
+      mix[i] += _tiny_voice_sample(voice, index);
+      voice->position += voice->step;
+    }
+  }
+}
+
+#ifndef TINY_NO_MOD
+/* micromod plays stereo; the mixer is mono, so fold it down. Chunked to keep the stack small. */
+#define TINY_MOD_CHUNK 128
+
+static void _tiny_mix_mod(tiny_game* game, int32_t* mix, int frames) {
+  if (game->music == NULL) {
+    return;
+  }
+  int16_t stereo[TINY_MOD_CHUNK * 2];
+  int done = 0;
+  while (done < frames) {
+    int chunk = TINY_MIN(TINY_MOD_CHUNK, frames - done);
+    TINY_MEMSET(stereo, 0, sizeof(int16_t) * (size_t)chunk * 2);
+    micromod_get_audio(stereo, chunk);
+    for (int i = 0; i < chunk; i++) {
+      mix[done + i] += ((int32_t)stereo[i * 2] + stereo[i * 2 + 1]) / 2;
+    }
+    done += chunk;
+    game->music_played += (uint32_t)chunk;
+  }
+  if (!game->music_loop && game->music_length > 0 && game->music_played >= game->music_length) {
+    game->music = NULL;
+  }
+}
+
+static bool _tiny_start_mod(tiny_game* game, const tiny_sound* sound, bool loop) {
+  /* micromod reads the header in place and only ever reads the module, so dropping const is safe. */
+  if (micromod_initialise((signed char*)sound->data, TINY_AUDIO_RATE) < 0) {
+#ifndef TINY_NO_STDIO
+    _tiny_log(PNTR_APP_LOG_ERROR, "tinyengine: '%s' is not a MOD micromod can play", sound->name);
+#endif
+    return false;
+  }
+  micromod_set_gain(64);
+  game->music = sound;
+  game->music_loop = loop;
+  game->music_played = 0;
+  long length = micromod_calculate_song_duration();
+  game->music_length = length > 0 ? (uint32_t)length : 0;
+  return true;
+}
+#endif
+
+bool tiny_sound_play(tiny_game* game, const char* name, bool loop) {
+  if (game == NULL || name == NULL) {
+    return false;
+  }
+  const tiny_sound* sound = _tiny_find_sound(game, name);
+  if (sound == NULL) {
+#ifndef TINY_NO_STDIO
+    _tiny_log(PNTR_APP_LOG_WARNING, "tinyengine: no sound named '%s'", name);
+#endif
+    return false;
+  }
+  if (sound->kind == TINY_SOUND_MOD) {
+#ifdef TINY_NO_MOD
+    return false;
+#else
+    return _tiny_start_mod(game, sound, loop);
+#endif
+  }
+  return _tiny_start_voice(game, sound, loop);
+}
+
+void tiny_sound_stop(tiny_game* game, const char* name) {
+  if (game == NULL) {
+    return;
+  }
+  const tiny_sound* sound = _tiny_find_sound(game, name);
+  if (sound == NULL) {
+    return;
+  }
+  if (game->music == sound) {
+    game->music = NULL;
+  }
+  for (int i = 0; i < TINY_MAX_VOICES; i++) {
+    if (game->voices[i].active && game->voices[i].sound == sound) {
+      _tiny_voice_stop(&game->voices[i]);
+    }
+  }
+}
+
+bool tiny_sound_playing(tiny_game* game, const char* name) {
+  if (game == NULL) {
+    return false;
+  }
+  const tiny_sound* sound = _tiny_find_sound(game, name);
+  if (sound == NULL) {
+    return false;
+  }
+  if (game->music == sound) {
+    return true;
+  }
+  for (int i = 0; i < TINY_MAX_VOICES; i++) {
+    if (game->voices[i].active && game->voices[i].sound == sound) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool tiny_audio_active(tiny_game* game) {
+  if (game == NULL) {
+    return false;
+  }
+#ifndef TINY_NO_MOD
+  if (game->music != NULL) {
+    return true;
+  }
+#endif
+  for (int i = 0; i < TINY_MAX_VOICES; i++) {
+    if (game->voices[i].active) {
+      return true;
+    }
+  }
+  return false;
+}
+
+void tiny_audio_render(tiny_game* game, int16_t* samples, int frames) {
+  if (game == NULL || samples == NULL || frames <= 0) {
+    return;
+  }
+  for (int start = 0; start < frames; start += TINY_AUDIO_CHUNK) {
+    int count = TINY_MIN(TINY_AUDIO_CHUNK, frames - start);
+    int32_t mix[TINY_AUDIO_CHUNK];
+    TINY_MEMSET(mix, 0, sizeof(int32_t) * (size_t)count);
+    _tiny_mix_voices(game, mix, count);
+#ifndef TINY_NO_MOD
+    _tiny_mix_mod(game, mix, count);
+#endif
+    for (int i = 0; i < count; i++) {
+      int32_t sample = mix[i];
+      samples[start + i] = (int16_t)(sample > 32767 ? 32767 : (sample < -32768 ? -32768 : sample));
+    }
+  }
+}
+
 /*-- the view -------------------------------------------------------------------------------*/
 
 pntr_rectangle tiny_view(tiny_game* game) {
@@ -1423,6 +1790,8 @@ tiny_game* tiny_init(pntr_app* app, const tiny_game_def* def, void* user) {
   game->def = def;
   game->app = app;
   game->user = user;
+  game->sounds = def->sounds;
+  game->sound_count = def->sound_count;
   game->screen_w = pntr_app_width(app);
   game->screen_h = pntr_app_height(app);
 
@@ -1437,6 +1806,11 @@ void tiny_unload(tiny_game* game) {
   }
   if (game->def != NULL && game->def->leave != NULL && game->map != NULL) {
     game->def->leave(game);
+  }
+  for (int i = 0; i < TINY_MAX_VOICES; i++) {
+    if (game->voices[i].active) {
+      _tiny_voice_stop(&game->voices[i]);
+    }
   }
   pntr_unload_memory(game->objects);
   pntr_unload_memory(game);

@@ -1,13 +1,15 @@
 /**
- * Every map in the project -- baked by tiny_bake.py. Do not edit.
+ * Every map and sound in the project -- baked by tiny_bake.py. Do not edit.
  *
  * Include this from exactly one translation unit: it defines the data, not just
- * declarations. Hand TINY_MAPS and TINY_MAP_COUNT to your tiny_game_def.
+ * declarations. Hand TINY_MAPS/TINY_MAP_COUNT and TINY_SOUNDS/TINY_SOUND_COUNT to
+ * your tiny_game_def.
  */
 #ifndef TINY_BAKED_MAPS_H
 #define TINY_BAKED_MAPS_H
 
 #include "game_tiles.h"
+#include "game_sounds.h"
 #include "map_arena.h"
 #include "map_cave.h"
 #include "map_ledge.h"

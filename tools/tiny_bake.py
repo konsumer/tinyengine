@@ -11,23 +11,31 @@ straight out of flash. Nothing is decoded at runtime and nothing but the object 
 touches the heap.
 
   tiny_bake.py maps/*.tmj -o generated/
+  tiny_bake.py maps/*.tmj -o generated/ --sounds sounds/*.wav sounds/*.mod
   tiny_bake.py maps/*.tmj -o generated/ --format argb --flash-budget 1310720
+
+WAV is decoded to mono PCM at bake time, so the engine plays raw samples with no decoder.
+MOD bytes and SfxParams are inlined as they are, for micromod and pntr_app_sfx to read.
 
 Emits, into the output directory:
 
-  game_tiles.h   the shared tile table and every animation
-  map_<name>.h   one per map: layers, objects, properties
-  game_maps.h    includes all of the above and defines TINY_MAPS[]
+  game_tiles.h    the shared tile table and every animation
+  game_sounds.h   the shared sound bank
+  map_<name>.h    one per map: layers, objects, properties
+  game_maps.h     includes all of the above and defines TINY_MAPS[] and TINY_SOUNDS[]
 
 Include game_maps.h from exactly one translation unit.
 """
 
 import argparse
 import base64
+import glob
 import json
 import os
 import re
+import struct
 import sys
+import wave
 import zlib
 from collections import OrderedDict
 
@@ -97,6 +105,16 @@ PROP_TYPES = {
   'object': 5,
   'file': 3
 }
+
+# What a sound file's extension says about how to bake it. WAV is decoded to raw mono PCM at
+# bake time, so nothing is decoded at runtime; MOD and SfxParams are inlined as they are and
+# read straight out of flash by the player or the synth.
+SOUND_WAV = ('wav',)
+SOUND_MOD = ('mod',)
+SOUND_SFX = ('sfs', 'rfx')
+
+# SfxParams as pntr_app_sfx stores it: uint32 seed, int wave type, then 22 floats.
+SFX_PARAMS_BYTES = 96
 
 warnings = []
 
@@ -600,6 +618,137 @@ class BakedMap:
 
 
 # ---------------------------------------------------------------------------------------------
+# Sounds
+# ---------------------------------------------------------------------------------------------
+
+
+def resample(values, source_rate, target_rate):
+  """Linear resample, done once at bake time so the runtime never has to."""
+  if source_rate == target_rate or not values:
+    return values
+  count = max(1, int(round(len(values) * float(target_rate) / source_rate)))
+  ratio = float(source_rate) / target_rate
+  out = []
+  for i in range(count):
+    position = i * ratio
+    index = int(position)
+    fraction = position - index
+    a = values[index] if index < len(values) else 0.0
+    b = values[index + 1] if index + 1 < len(values) else a
+    out.append(a + (b - a) * fraction)
+  return out
+
+
+class BakedSound:
+  """One baked sound asset: mono PCM, module bytes, or SfxParams bytes.
+
+  WAV is decoded, downmixed and resampled here, so the engine plays raw samples out of
+  flash with no decoder and no per-frame work. MOD and SfxParams keep their bytes, because
+  micromod reads the module and pntr_app_sfx reads the parameters themselves.
+  """
+
+  def __init__(self, path, rate):
+    self.path = path
+    self.name = os.path.splitext(os.path.basename(path))[0]
+    self.ident = identifier(self.name)
+    ext = os.path.splitext(path)[1].lstrip('.').lower()
+
+    with open(path, 'rb') as handle:
+      raw = handle.read()
+    if not raw:
+      die('sound %s is empty' % path)
+
+    if ext in SOUND_WAV:
+      self._bake_wav(raw, path, rate)
+    elif ext in SOUND_MOD:
+      # Inlined verbatim. micromod reads it out of flash and does not modify it.
+      self.kind = 'TINY_SOUND_MOD'
+      self.ctype = 'uint8_t'
+      self.values = list(raw)
+      self.bits = 0
+      self.rate = 0
+    elif ext in SOUND_SFX:
+      # rFXGen .sfs files are an 8 byte header and then the 96 byte SfxParams payload.
+      payload = raw[-SFX_PARAMS_BYTES:] if len(raw) > SFX_PARAMS_BYTES else raw
+      if len(payload) != SFX_PARAMS_BYTES:
+        die('sound %s is %d bytes; expected a %d byte SfxParams payload'
+            % (path, len(raw), SFX_PARAMS_BYTES))
+      self.kind = 'TINY_SOUND_SFX'
+      self.ctype = 'uint8_t'
+      self.values = list(payload)
+      self.bits = 0
+      self.rate = 0
+    else:
+      die('sound %s has an unsupported extension %r; expected one of: %s'
+          % (path, ext, ', '.join(SOUND_WAV + SOUND_MOD + SOUND_SFX)))
+
+  def _bake_wav(self, raw, path, target_rate):
+    import io
+
+    try:
+      with wave.open(io.BytesIO(raw)) as handle:
+        channels = handle.getnchannels()
+        width = handle.getsampwidth()
+        rate = handle.getframerate()
+        frames = handle.readframes(handle.getnframes())
+    except Exception as error:
+      die('cannot read the WAV %s: %s (only uncompressed PCM WAV is supported)' % (path, error))
+    if width not in (1, 2, 3, 4):
+      die('the WAV %s has a %d byte sample size, which is not supported' % (path, width))
+
+    if width == 1:
+      values = [(byte - 128) / 128.0 for byte in frames]
+    elif width == 2:
+      values = [sample[0] / 32768.0 for sample in struct.iter_unpack('<h', frames)]
+    elif width == 3:
+      values = [int.from_bytes(frames[i:i + 3], 'little', signed=True) / 8388608.0
+                for i in range(0, len(frames) - 2, 3)]
+    else:
+      values = [sample[0] / 2147483648.0 for sample in struct.iter_unpack('<i', frames)]
+
+    if channels > 1:
+      # Downmix: the mixer is mono, and so is the CYD's speaker.
+      values = [sum(values[i:i + channels]) / channels for i in range(0, len(values), channels)]
+
+    values = resample(values, rate, target_rate)
+    if not values:
+      warn('sound %s has no samples' % path)
+
+    # Keep 8 bit sources 8 bit; the ESP32 half of the flash bill is worth it for a blip.
+    self.kind = 'TINY_SOUND_PCM'
+    self.bits = 8 if width == 1 else 16
+    self.rate = target_rate
+    if self.bits == 8:
+      self.ctype = 'uint8_t'
+      self.values = [min(255, max(0, int(round(value * 127.0 + 128.0)))) for value in values]
+    else:
+      self.ctype = 'int16_t'
+      self.values = [min(32767, max(-32768, int(round(value * 32767.0)))) for value in values]
+
+  @property
+  def byte_size(self):
+    return len(self.values) * (2 if self.ctype == 'int16_t' else 1)
+
+
+def bake_sounds(paths, rate):
+  """Resolve a list of sound paths (globs allowed) into baked sounds, names deduplicated."""
+  sounds = []
+  seen = {}
+  for pattern in paths:
+    matches = sorted(glob.glob(pattern)) or [pattern]
+    for path in matches:
+      if not os.path.isfile(path):
+        die('sound %s does not exist' % path)
+      sound = BakedSound(path, rate)
+      if sound.ident in seen:
+        die('two sounds are both called %r: %s and %s' % (sound.name, seen[sound.ident], path))
+      seen[sound.ident] = path
+      note('read %s as sound %r (%s)' % (path, sound.name, sound.kind[11:].lower()))
+      sounds.append(sound)
+  return sounds
+
+
+# ---------------------------------------------------------------------------------------------
 # Emitting C
 # ---------------------------------------------------------------------------------------------
 
@@ -812,18 +961,62 @@ def emit_map(baked, pixel_format):
   return '\n'.join(out)
 
 
-def emit_registry(maps):
+def emit_sounds(sounds, columns):
   out = []
   out.append('/**')
-  out.append(' * Every map in the project -- baked by tiny_bake.py. Do not edit.')
+  out.append(' * The shared sound bank -- baked by tiny_bake.py. Do not edit.')
+  out.append(' *')
+  out.append(' * %d sounds, %d bytes of flash. WAV audio is already mono PCM, so the engine'
+             % (len(sounds), sum(sound.byte_size for sound in sounds)))
+  out.append(' * mixer just reads it. Module bytes go to micromod and SfxParams to pntr_app_sfx.')
+  out.append(' * Everything is `static const`, so on an ESP32 it lands in .rodata.')
+  out.append(' */')
+  out.append('#ifndef TINY_BAKED_SOUNDS_H')
+  out.append('#define TINY_BAKED_SOUNDS_H')
+  out.append('')
+  out.append('#include "tinyengine.h"')
+  out.append('')
+  out.append('#define TINY_SOUND_COUNT %d' % len(sounds))
+  out.append('')
+
+  for index, sound in enumerate(sounds):
+    out.append('static const %s tiny_snd_%d[%d] = {' % (sound.ctype, index, len(sound.values)))
+    for start in range(0, len(sound.values), columns):
+      row = sound.values[start:start + columns]
+      out.append('  ' + ' '.join('%d,' % value for value in row))
+    out.append('};')
+    out.append('')
+
+  if not sounds:
+    # An empty array is not valid C, so give the pointer something legal to be.
+    out.append('#define TINY_SOUNDS NULL')
+  else:
+    out.append('static const tiny_sound TINY_SOUNDS[TINY_SOUND_COUNT] = {')
+    for index, sound in enumerate(sounds):
+      out.append('  { .name = %s, .hash = 0x%08XU, .kind = %s, .bits = %d, .rate = %d,'
+                 % (c_string(sound.name), fnv1a(sound.name), sound.kind, sound.bits, sound.rate))
+      out.append('    .data = tiny_snd_%d, .size = %d },' % (index, sound.byte_size))
+    out.append('};')
+  out.append('')
+  out.append('#endif  // TINY_BAKED_SOUNDS_H')
+  out.append('')
+  return '\n'.join(out)
+
+
+def emit_registry(maps, sounds):
+  out = []
+  out.append('/**')
+  out.append(' * Every map and sound in the project -- baked by tiny_bake.py. Do not edit.')
   out.append(' *')
   out.append(' * Include this from exactly one translation unit: it defines the data, not just')
-  out.append(' * declarations. Hand TINY_MAPS and TINY_MAP_COUNT to your tiny_game_def.')
+  out.append(' * declarations. Hand TINY_MAPS/TINY_MAP_COUNT and TINY_SOUNDS/TINY_SOUND_COUNT to')
+  out.append(' * your tiny_game_def.')
   out.append(' */')
   out.append('#ifndef TINY_BAKED_MAPS_H')
   out.append('#define TINY_BAKED_MAPS_H')
   out.append('')
   out.append('#include "game_tiles.h"')
+  out.append('#include "game_sounds.h"')
   for baked in maps:
     out.append('#include "map_%s.h"' % baked.ident)
   out.append('')
@@ -842,19 +1035,22 @@ def emit_registry(maps):
 # ---------------------------------------------------------------------------------------------
 
 
-def report(table, maps, budget):
+def report(table, maps, sounds, budget):
   tile_bytes = table.bytes_used()
   map_bytes = sum(sum(len(layer['tiles'] or []) for layer in baked.layers) * 2 for baked in maps)
-  total = tile_bytes + map_bytes
+  sound_bytes = sum(sound.byte_size for sound in sounds)
+  total = tile_bytes + map_bytes + sound_bytes
   share = 100.0 * total / budget if budget else 0.0
 
   note('%d maps, %d tile slices baked down to %d unique tiles'
        % (len(maps), table.slices, len(table.tiles) - 1))
-  note('%d bytes of tile pixels + %d bytes of layer data = %d bytes of flash (%.1f%% of a %d byte partition)'
-       % (tile_bytes, map_bytes, total, share, budget))
+  note('%d bytes of tile pixels + %d bytes of layer data + %d bytes of sound = %d bytes of flash (%.1f%% of a %d byte partition)'
+       % (tile_bytes, map_bytes, sound_bytes, total, share, budget))
   if table.anim_order:
     named = sum(1 for slot in table.anim_order if slot['name'])
     note('%d animations, %d of them named and playable with tiny_play()' % (len(table.anim_order), named))
+  if sounds:
+    note('%d sounds, %d bytes' % (len(sounds), sound_bytes))
 
   if total >= budget:
     warn('this exceeds the app partition on its own, so it will not link')
@@ -868,6 +1064,10 @@ def main():
     epilog='Include the generated game_maps.h from one translation unit, after tinyengine.h.')
   parser.add_argument('maps', nargs='+', help='Tiled JSON maps (.tmj or .json)')
   parser.add_argument('-o', '--output', required=True, help='directory to write the headers into')
+  parser.add_argument('--sounds', nargs='*', default=[], metavar='FILE',
+                      help='sound files (or globs): .wav, .mod, .sfs')
+  parser.add_argument('--sound-rate', type=int, default=22050, metavar='HZ',
+                      help='rate to bake WAV audio at (default: 22050, what the mixer plays)')
   parser.add_argument('--format', choices=('rgba', 'argb'), default='rgba',
                       help="pntr pixel format to pack for (default: rgba, which is what pntr_app uses)")
   parser.add_argument('--flash-budget', type=int, default=DEFAULT_FLASH_BUDGET, metavar='BYTES',
@@ -891,12 +1091,19 @@ def main():
             len(baked.layers), len(baked.objects)))
     baked_maps.append(baked)
 
+  baked_sounds = bake_sounds(args.sounds, args.sound_rate)
+
   os.makedirs(args.output, exist_ok=True)
 
   written = []
   path = os.path.join(args.output, 'game_tiles.h')
   with open(path, 'w') as handle:
     handle.write(emit_tiles(table, args.format, max(1, args.columns)))
+  written.append(path)
+
+  path = os.path.join(args.output, 'game_sounds.h')
+  with open(path, 'w') as handle:
+    handle.write(emit_sounds(baked_sounds, max(1, args.columns)))
   written.append(path)
 
   for baked in baked_maps:
@@ -907,10 +1114,10 @@ def main():
 
   path = os.path.join(args.output, 'game_maps.h')
   with open(path, 'w') as handle:
-    handle.write(emit_registry(baked_maps))
+    handle.write(emit_registry(baked_maps, baked_sounds))
   written.append(path)
 
-  report(table, baked_maps, args.flash_budget)
+  report(table, baked_maps, baked_sounds, args.flash_budget)
   note('wrote %d headers into %s' % (len(written), args.output))
 
   if args.strict and warnings:

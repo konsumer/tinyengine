@@ -47,6 +47,7 @@ option(TINYENGINE_BUILD_PREVIEW "tinyengine: headless PNG renderer, used by the 
 
 find_package(pntr REQUIRED)
 find_package(pntr_app REQUIRED)
+find_package(pntr_app_sfx REQUIRED)
 
 if(TINYENGINE_BUILD_EXAMPLE)
     add_subdirectory(examples/demo)

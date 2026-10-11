@@ -16,7 +16,8 @@ A game is three things:
 3. One function that says how objects behave.
 
 The demo is 6 maps, 47 unique tiles and about 350 lines of behaviour. On an ESP32 it is
-**22 KB of RAM and 339 KB of flash**, maps included.
+**22 KB of RAM and 339 KB of flash**, maps included. Sound is baked the same way maps are —
+WAV decoded to mono PCM, MOD and SfxParams inlined — and mixed by the engine.
 
 ---
 
@@ -168,13 +169,14 @@ tiny_bake: 20480 bytes of tile pixels + 19776 bytes of layer data = 40256 bytes 
 tiny_bake: 7 animations, 6 of them named and playable with tiny_play()
 ```
 
-It writes three kinds of header into the output directory:
+It writes these headers into the output directory:
 
 | File | What it holds |
 | --- | --- |
 | `game_tiles.h` | The shared tile table and every animation |
+| `game_sounds.h` | The shared sound bank |
 | `map_<name>.h` | One per map: layers, objects, properties |
-| `game_maps.h` | Includes the rest and defines `TINY_MAPS[]` |
+| `game_maps.h` | Includes the rest and defines `TINY_MAPS[]` and `TINY_SOUNDS[]` |
 
 Include `game_maps.h` from exactly one translation unit — it defines data, not declarations.
 
@@ -183,9 +185,11 @@ you would re-export anything else, and commit what it writes. That keeps Python 
 build entirely: a checkout needs nothing but a C compiler, which matters most for the ESP32,
 where the build already has enough moving parts.
 
-Options: `--format argb` if your pntr is built for that pixel format (the baker `#error`s
-at compile time if it does not match), `--flash-budget` to size the report against your
-partition, `--strict` to fail on warnings.
+Options: `--sounds FILE...` to bake audio (globs allowed), `--sound-rate HZ` to pick the
+rate WAV audio is decoded to (default 22050, which is what the mixer plays), `--format argb`
+if your pntr is built for that pixel format (the baker `#error`s at compile time if it does
+not match), `--flash-budget` to size the report against your partition, `--strict` to fail on
+warnings.
 
 ---
 
@@ -236,12 +240,60 @@ bytes each. Nothing else in the engine touches the heap.
 
 ---
 
+## Sound
+
+Audio is baked the same way art is: decoded at build time, `static const` in flash, and read
+straight out of `.rodata` at runtime. Bake it with `--sounds`:
+
+```bash
+python3 tools/tiny_bake.py maps/*.tmj -o generated/ \
+    --sounds 'sounds/*.wav' 'sounds/*.mod' 'sounds/*.sfs'
+```
+
+| Extension | Baked as | Played by |
+| --- | --- | --- |
+| `.wav` | Mono PCM, decoded and downmixed at bake time | the engine's mixer, directly |
+| `.mod` | The module bytes, verbatim | [micromod](https://github.com/martincameron/micromod), vendored in `include/` |
+| `.sfs` | The 96 byte `SfxParams` payload | [`pntr_app_sfx`](https://github.com/konsumer/pntr_app_sfx), synthesised once at load |
+
+WAV audio is resampled to `--sound-rate` (22050 by default) so the mixer never has to
+interpolate, and a stereo source is folded to mono — the CYD's speaker is mono anyway, and
+half the bytes is half the flash. Nothing is compressed.
+
+**One mixer, a swappable sink.** The engine mixes mono `int16` at `TINY_AUDIO_RATE` and
+hands it over with one call. It never opens a device itself:
+
+```c
+tiny_sound_play(game, "jump", false);   // a WAV or SFX one-shot, or a looping MOD
+tiny_sound_stop(game, "theme");
+bool playing = tiny_sound_playing(game, "theme");
+
+int16_t block[512];                     // the platform's sink calls this
+tiny_audio_render(game, block, 512);
+```
+
+A PCM or SFX sound takes one of `TINY_MAX_VOICES` (8 by default) mixer voices, so several
+sound at once. A MOD takes the single music slot, because micromod is a whole-song player:
+starting a second module replaces the first. The demo's sink lives in `demo.c` and is the
+only code that knows what hardware exists — a raylib `AudioStream` fed from the game loop, a
+web `ScriptProcessorNode`, or an I2S/DAC channel on an ESP32. Replace that one block and the
+engine and the game do not change.
+
+`pntr_app_sfx` is optional. `#define PNTR_APP_SFX_IMPLEMENTATION` and include
+`pntr_app_sfx.h` **before** `tinyengine.h`, and an `.sfs` sound is synthesised on first play;
+skip it and those sounds are simply skipped. `.wav` and `.mod` need nothing extra.
+
+The vendored micromod allocates nothing — all of its state is static — so a MOD costs no
+heap, just the bytes in flash.
+
+---
+
 ## Building
 
 **Web** — needs [emscripten](https://emscripten.org).
 
 ```bash
-emcmake cmake -S . -B build-web
+emcmake cmake -B build-web
 cmake --build build-web
 # build-web/examples/demo/demo.html, a single self-contained file
 ```
@@ -250,7 +302,7 @@ cmake --build build-web
 it downloads; after that it is cached.
 
 ```bash
-cmake -S . -B build
+cmake -B build
 cmake --build build
 ./build/examples/demo/demo
 ```
@@ -280,6 +332,11 @@ Because nothing is decoded at runtime, the ESP32 build can drop pntr's image loa
 entirely with `-D PNTR_NO_LOAD_IMAGE`, which is most of the flash an application like this
 would otherwise spend.
 
+The CYD's speaker port is a plain GPIO DAC, so the demo bit-bangs it on GPIO 26 from its own
+task (`TINY_SPEAKER_PIN` in `demo.c`). That is the whole ESP32 audio backend, and it is
+deliberately the same one-function seam as the other targets: point it at I2S, another pin,
+or a different board and nothing in the engine changes.
+
 ---
 
 ## Checking what it draws
@@ -299,6 +356,11 @@ Each case asserts the frame is not blank, that sprites were actually on screen, 
 player did not come to rest **inside a solid tile**. That last one is what catches collision
 regressions: the suite holds each direction against each map's geometry for 400 frames, which
 is how you find something clipping through a wall. A screenshot will not tell you.
+
+It also drives the mixer: it plays a looping MOD, a one-shot WAV and a synthesised SFX,
+renders real buffers, and checks the output is not silent, that the module is still looping
+and that the one-shot stopped. That is a real signal, not a mock — the mixer runs for real,
+only the audio device is absent.
 
 ---
 
@@ -325,6 +387,10 @@ The art and the `.tmj` files are generated by `examples/demo/assets/make_assets.
 can be regenerated and tweaked, but what it writes are ordinary Tiled files: open them,
 edit them, re-bake.
 
+The music is the one asset that is not generated: `assets/theme.mod` is *Japanese Toycar* by
+Sami Jarvinen (Groo), kept as a real ProTracker module to exercise micromod. Check its
+license before shipping the demo anywhere you care about.
+
 ---
 
 ## Limits
@@ -333,7 +399,9 @@ edit them, re-bake.
 - Object rotation is ignored, and a polygon object collides as its bounding box.
 - Tiled `class` properties are not flattened; the baker warns and skips them.
 - Image layers are skipped. Convert them to a tile layer.
-- Sound is up to you: pntr_app has no audio backend on the ESP32 yet.
+- One MOD plays at a time, because micromod is a single-song player.
+- WAV is baked to mono PCM, uncompressed: a long track is a lot of flash. Prefer a MOD for
+  music and short WAVs or `.sfs` for effects.
 
 ## License
 
