@@ -18,6 +18,11 @@
  *       TINY_ENGINE_IMPLEMENTATION  Emit the implementation in this translation unit.
  *       TINY_MAX_OBJECTS            Objects live at once, per map. Default 96.
  *       TINY_NO_STDIO               Never log through pntr_app_log.
+ *       TINY_NO_AUDIO_OUTPUT        Do not open an audio device. Call tiny_audio_render()
+ *                                   from your own sink instead.
+ *       TINY_TOUCH_CONTROLS         Draw an on-screen d-pad and A/B buttons, worked by touch
+ *                                   or the mouse. They hold the matching gamepad buttons in
+ *                                   tiny_held() and tiny_axis_x/y(), so games need no code.
  *
  *   LICENSE: zlib/libpng, same as pntr_app.
  *
@@ -57,6 +62,16 @@ extern "C" {
 #ifndef TINY_MAX_VOICES
 /** PCM and SFX sounds that can play at once. A MOD uses the one music slot, not a voice. */
 #define TINY_MAX_VOICES 8
+#endif
+
+#ifndef TINY_MAX_TOUCHES
+/** Fingers the touch controls follow at once, where the screen can report more than one. */
+#define TINY_MAX_TOUCHES 4
+#endif
+
+#ifndef TINY_MAX_SFX
+/** Different SFX sounds kept synthesised at once. Each costs its own length in RAM. */
+#define TINY_MAX_SFX 16
 #endif
 
 /*--------------------------------------------------------------------------------------------
@@ -300,6 +315,8 @@ typedef struct tiny_object {
   int32_t state; /** Yours. */
   float timer;   /** Yours. */
   void* user;    /** Yours. */
+
+  uint8_t portal; /** The engine's: whether a portal is armed. */
 } tiny_object;
 
 typedef enum tiny_camera_mode {
@@ -324,8 +341,7 @@ typedef struct tiny_game tiny_game;
  */
 typedef struct tiny_voice {
   const tiny_sound* sound;
-  const void* samples; /** PCM source: flash for a WAV, heap for a generated SFX. */
-  void* owned;         /** Heap block to free when the voice ends, or NULL. */
+  const void* samples; /** PCM source: flash for a WAV, the SFX cache for an SFX. */
   uint32_t count;      /** Samples in `samples`. */
   uint32_t position;   /** Read cursor, 16.16 fixed point, so a differing rate resamples. */
   uint32_t step;       /** 16.16 advance per output frame. */
@@ -333,6 +349,13 @@ typedef struct tiny_voice {
   bool loop;
   bool active;
 } tiny_voice;
+
+/** An SFX sound, synthesised the first time it plays and kept for the next. */
+typedef struct tiny_sfx {
+  const tiny_sound* sound;
+  int16_t* samples; /** At TINY_SFX_RATE. */
+  uint32_t count;
+} tiny_sfx;
 
 /**
  * The game you are writing.
@@ -379,9 +402,20 @@ struct tiny_game {
   bool music_loop;
   uint32_t music_played; /** Output frames since the module started. */
   uint32_t music_length; /** Samples in one pass of the module, so a non-loop can stop. */
+  tiny_sfx sfx[TINY_MAX_SFX];
 
   pntr_app* app; /** Set by tiny_init(), so behaviour code can read input. */
   void* user;    /** Yours. */
+
+  uint32_t touch_buttons; /** Gamepad buttons the touch controls hold: bit `1 << button`. */
+  bool touch_visible;     /** On the web, set by the first touch. Everywhere else, from the start. */
+  uint8_t touch_count;
+  float touch_x[TINY_MAX_TOUCHES];
+  float touch_y[TINY_MAX_TOUCHES];
+
+  pntr_font* font;     /** Draws tiny_say() messages. The default font unless you swap it. */
+  const char* message; /** What tiny_say() is showing, or NULL. */
+  float message_timer;
 
   const tiny_map* pending_map; /** tiny_goto_map() defers until the frame ends. */
   const char* pending_spawn;
@@ -400,10 +434,14 @@ struct tiny_game {
 TINY_API tiny_game* tiny_init(pntr_app* app, const tiny_game_def* def, void* user);
 TINY_API void tiny_unload(tiny_game* game);
 
-/** Step behaviour, animation, the camera, and any pending map change. */
+/**
+ * Step behaviour, animation, the camera, portals, and any pending map change.
+ *
+ * `dt` is capped at 1/20s, so a long stall cannot carry anything through a wall.
+ */
 TINY_API void tiny_update(tiny_game* game, float dt);
 
-/** Draw the map and its objects, then call def->draw for the overlay. */
+/** Draw the map and its objects, call def->draw for the overlay, then any tiny_say() box. */
 TINY_API void tiny_draw(tiny_game* game, pntr_image* screen);
 
 /* -- maps ------------------------------------------------------------------------------- */
@@ -415,8 +453,32 @@ TINY_API const tiny_map* tiny_find_map(tiny_game* game, const char* name);
  *
  * `spawn` names an object on the destination map to place the player at, which is how a
  * portal lands you somewhere sensible. Pass NULL to use the destination's own player object.
+ *
+ * Objects of class `portal` do this on their own: when the player walks into one, the
+ * engine goes to its `destination` property, lands on its `spawn`, and plays the sound
+ * named by `sound`. A portal you arrive standing on waits until you step off it, so a door
+ * does not throw you straight back through.
  */
 TINY_API bool tiny_goto_map(tiny_game* game, const char* name, const char* spawn);
+
+/* -- input ------------------------------------------------------------------------------ */
+
+/** Whether a key, or that button on the first gamepad, is down. */
+TINY_API bool tiny_held(tiny_game* game, pntr_app_key key, pntr_app_gamepad_button button);
+
+/** -1, 0 or 1 from the arrow keys and the d-pad. Up is -1. */
+TINY_API float tiny_axis_x(tiny_game* game);
+TINY_API float tiny_axis_y(tiny_game* game);
+
+/* -- messages --------------------------------------------------------------------------- */
+
+/**
+ * Show text in a box along the bottom of the screen for `seconds`, word-wrapped to fit.
+ *
+ * The text is not copied, so pass a string that outlives the message: a literal, or a
+ * property read off a map.
+ */
+TINY_API void tiny_say(tiny_game* game, const char* text, float seconds);
 
 /* -- objects ---------------------------------------------------------------------------- */
 
@@ -469,9 +531,8 @@ TINY_API bool tiny_sound_playing(tiny_game* game, const char* name);
 /**
  * Fill `frames` mono int16 samples at TINY_AUDIO_RATE. The platform's audio sink calls this.
  *
- * This is the whole audio output: the engine never opens a device itself. On the web the
- * sink is a ScriptProcessorNode, on the desktop an AudioStream, and on an ESP32 an I2S
- * channel -- any of them can be swapped for another without touching the engine.
+ * The engine opens a sink for the raylib, web and ESP32 backends itself and feeds it from
+ * tiny_update(). Define TINY_NO_AUDIO_OUTPUT to bring your own and call this from it.
  */
 TINY_API void tiny_audio_render(tiny_game* game, int16_t* samples, int frames);
 
@@ -624,6 +685,7 @@ static void _tiny_log(pntr_app_log_type type, const char* format, ...) {
 #endif
 
 #define TINY_MIN(a, b) ((a) < (b) ? (a) : (b))
+#define TINY_BUTTON_BIT(button) (1u << (button))
 #define TINY_MAX(a, b) ((a) > (b) ? (a) : (b))
 
 /* How many tiles past the view to still consider, for images that overhang their own cell. */
@@ -1271,11 +1333,65 @@ static uint32_t _tiny_voice_step(uint16_t rate) {
 }
 
 static void _tiny_voice_stop(tiny_voice* voice) {
-  if (voice->owned != NULL) {
-    PNTR_FREE(voice->owned);
-  }
   TINY_MEMSET(voice, 0, sizeof(tiny_voice));
 }
+
+#ifdef PNTR_APP_SFX_H__
+/* pntr_app_sfx always synthesises at 44100. The cache keeps half that, which is plenty. */
+#define TINY_SFX_RATE 22050
+
+/*
+ * Synthesise an SFX once and keep it. Rendering on every play would cost a synth pass and an
+ * allocation each time, which an ESP32 notices.
+ *
+ * pntr_app_sfx sizes its buffer as sampleRate * maxDuration and uses the rate for nothing
+ * else, so asking for `length` per second, for one second, gives a buffer exactly as long as
+ * the sound's envelope rather than the usual several seconds of it.
+ */
+static const tiny_sfx* _tiny_sfx_render(tiny_game* game, const tiny_sound* sound) {
+  tiny_sfx* slot = NULL;
+  for (int i = 0; i < TINY_MAX_SFX; i++) {
+    if (game->sfx[i].sound == sound) {
+      return &game->sfx[i];
+    }
+    if (slot == NULL && game->sfx[i].sound == NULL) {
+      slot = &game->sfx[i];
+    }
+  }
+  if (slot == NULL) {
+#ifndef TINY_NO_STDIO
+    _tiny_log(PNTR_APP_LOG_WARNING, "tinyengine: no room to keep '%s', raise TINY_MAX_SFX", sound->name);
+#endif
+    return NULL;
+  }
+
+  SfxParams params;
+  TINY_MEMSET(&params, 0, sizeof(params));
+  TINY_MEMCPY(&params, sound->data, sound->size < sizeof(params) ? sound->size : sizeof(params));
+  int length = 4;
+  length += (int)(params.attackTime * params.attackTime * 100000.0f);
+  length += (int)(params.sustainTime * params.sustainTime * 100000.0f);
+  length += (int)(params.decayTime * params.decayTime * 100000.0f);
+
+  SfxSynth* synth = pntr_app_sfx_alloc_synth(SFX_I16, length, 1);
+  if (synth == NULL) {
+    return NULL;
+  }
+  int count = pntr_app_sfx_generate_wave(game->app, synth, &params) / 2;
+  int16_t* samples = count > 0 ? (int16_t*)pntr_load_memory(sizeof(int16_t) * (size_t)count) : NULL;
+  if (samples != NULL) {
+    const int16_t* full = synth->samples.i16;
+    for (int i = 0; i < count; i++) {
+      samples[i] = (int16_t)(((int32_t)full[i * 2] + full[i * 2 + 1]) / 2);
+    }
+    slot->sound = sound;
+    slot->samples = samples;
+    slot->count = (uint32_t)count;
+  }
+  PNTR_FREE(synth);
+  return samples != NULL ? slot : NULL;
+}
+#endif
 
 static bool _tiny_start_voice(tiny_game* game, const tiny_sound* sound, bool loop) {
   tiny_voice* voice = NULL;
@@ -1294,32 +1410,19 @@ static bool _tiny_start_voice(tiny_game* game, const tiny_sound* sound, bool loo
   _tiny_voice_stop(voice);
   voice->sound = sound;
   voice->loop = loop;
-  voice->active = true;
 
   if (sound->kind == TINY_SOUND_SFX) {
 #ifdef PNTR_APP_SFX_H__
-    SfxSynth* synth = pntr_app_sfx_alloc_synth(SFX_I16, 44100, 10);
-    if (synth == NULL) {
-      voice->active = false;
+    const tiny_sfx* sfx = _tiny_sfx_render(game, sound);
+    if (sfx == NULL) {
       return false;
     }
-    SfxParams params;
-    TINY_MEMSET(&params, 0, sizeof(params));
-    TINY_MEMCPY(&params, sound->data, sound->size < sizeof(params) ? sound->size : sizeof(params));
-    int count = pntr_app_sfx_generate_wave(game->app, synth, &params);
-    if (count <= 0) {
-      PNTR_FREE(synth);
-      voice->active = false;
-      return false;
-    }
-    voice->samples = synth->samples.i16;
-    voice->owned = synth;
+    voice->samples = sfx->samples;
     voice->bits = 16;
-    voice->count = (uint32_t)count;
-    voice->step = _tiny_voice_step(44100);
+    voice->count = sfx->count;
+    voice->step = _tiny_voice_step(TINY_SFX_RATE);
 #else
     /* The application did not compile pntr_app_sfx, so a baked SFX has nothing to play it. */
-    voice->active = false;
 #ifndef TINY_NO_STDIO
     _tiny_log(PNTR_APP_LOG_WARNING, "tinyengine: '%s' is an SFX; #include pntr_app_sfx.h to play it", sound->name);
 #endif
@@ -1331,6 +1434,14 @@ static bool _tiny_start_voice(tiny_game* game, const tiny_sound* sound, bool loo
     voice->count = sound->size / (sound->bits == 8 ? 1u : 2u);
     voice->step = _tiny_voice_step(sound->rate);
   }
+  /*
+   * Switched on last: on an ESP32 the mixer runs on the other core, and it must never see
+   * a voice that is active before its samples are in place.
+   */
+#if defined(__GNUC__)
+  __sync_synchronize();
+#endif
+  voice->active = true;
   return true;
 }
 
@@ -1490,6 +1601,548 @@ void tiny_audio_render(tiny_game* game, int16_t* samples, int frames) {
     for (int i = 0; i < count; i++) {
       int32_t sample = mix[i];
       samples[start + i] = (int16_t)(sample > 32767 ? 32767 : (sample < -32768 ? -32768 : sample));
+    }
+  }
+}
+
+/*-- audio output ---------------------------------------------------------------------------*/
+
+/*
+ * The sink is the only part of the audio that knows what hardware exists. Each one pulls
+ * from tiny_audio_render(), and _tiny_audio_pump() runs once a frame from tiny_update().
+ */
+
+#if defined(TINY_NO_AUDIO_OUTPUT) || \
+    !(defined(PNTR_APP_RAYLIB) || defined(PNTR_APP_WEB) || defined(PNTR_APP_ESP32))
+/* No device. The mixer still works; the samples just go nowhere until someone asks. */
+static void _tiny_audio_open(tiny_game* game) { (void)game; }
+static void _tiny_audio_pump(tiny_game* game) { (void)game; }
+static void _tiny_audio_close(void) {}
+
+#elif defined(PNTR_APP_RAYLIB)
+/*
+ * raylib's buffer-push API (UpdateAudioStream) writes a whole sub-buffer at a time and zero
+ * pads the rest, and its sub-buffer size is `max(default, device period)`, which differs
+ * per machine. Pushing anything short of that chops the audio into silence-gaps and sounds
+ * like heavy distortion. The stream callback avoids the whole problem: raylib asks for an
+ * exact frame count whenever it needs one.
+ *
+ * That callback runs on the audio thread, so it must not touch engine state while the game
+ * thread is updating it. So the game thread renders into a small ring and the callback only
+ * drains it. One producer, one consumer, no locks.
+ */
+#define TINY_AUDIO_BLOCK 1024 /* frames rendered per pass */
+#define TINY_AUDIO_RING 4096  /* power of two, comfortably more than a device period */
+#define TINY_AUDIO_PREFILL (TINY_AUDIO_BLOCK * 2)
+
+static AudioStream _tiny_audio_stream;
+static bool _tiny_audio_ready;
+static int16_t _tiny_audio_ring[TINY_AUDIO_RING];
+static int16_t _tiny_audio_scratch[TINY_AUDIO_BLOCK];
+static volatile uint32_t _tiny_audio_head; /* written by the game thread */
+static volatile uint32_t _tiny_audio_tail; /* written by the audio thread */
+
+static void _tiny_audio_fill(void* buffer, unsigned int frames) {
+  int16_t* out = (int16_t*)buffer;
+  /* The head is only ever advanced, so this stays correct across uint32 wrap. */
+  uint32_t available = _tiny_audio_head - _tiny_audio_tail;
+#if defined(__GNUC__)
+  __sync_synchronize();
+#endif
+  uint32_t count = frames < available ? frames : available;
+  for (uint32_t i = 0; i < count; i++) {
+    out[i] = _tiny_audio_ring[(_tiny_audio_tail + i) & (TINY_AUDIO_RING - 1)];
+  }
+  for (unsigned int i = count; i < frames; i++) {
+    out[i] = 0;
+  }
+  _tiny_audio_tail += count;
+}
+
+static void _tiny_audio_open(tiny_game* game) {
+  (void)game;
+  _tiny_audio_stream = LoadAudioStream(TINY_AUDIO_RATE, 16, 1);
+  /* raylib no-ops on an invalid stream, so there is nothing to test here. */
+  _tiny_audio_ready = true;
+  SetAudioStreamCallback(_tiny_audio_stream, _tiny_audio_fill);
+  PlayAudioStream(_tiny_audio_stream);
+}
+
+static void _tiny_audio_pump(tiny_game* game) {
+  if (!_tiny_audio_ready) {
+    return;
+  }
+  /* Top the ring up to the prefill, and no further: bounded work per frame, bounded latency. */
+  uint32_t buffered = _tiny_audio_head - _tiny_audio_tail;
+  uint32_t want = TINY_AUDIO_PREFILL > buffered ? TINY_AUDIO_PREFILL - buffered : 0;
+  while (want > 0) {
+    uint32_t chunk = want < TINY_AUDIO_BLOCK ? want : TINY_AUDIO_BLOCK;
+    tiny_audio_render(game, _tiny_audio_scratch, (int)chunk);
+    for (uint32_t i = 0; i < chunk; i++) {
+      _tiny_audio_ring[(_tiny_audio_head + i) & (TINY_AUDIO_RING - 1)] = _tiny_audio_scratch[i];
+    }
+#if defined(__GNUC__)
+    __sync_synchronize();
+#endif
+    _tiny_audio_head += chunk;
+    want -= chunk;
+  }
+}
+
+static void _tiny_audio_close(void) {
+  if (_tiny_audio_ready) {
+    StopAudioStream(_tiny_audio_stream);
+    UnloadAudioStream(_tiny_audio_stream);
+  }
+  _tiny_audio_ready = false;
+}
+
+#elif defined(PNTR_APP_WEB)
+#include <emscripten.h>
+
+/*
+ * A ScriptProcessorNode pulls a block from the engine on every audio callback. JavaScript is
+ * single threaded, so this can never run in the middle of a C frame -- which is exactly why
+ * the engine can be a plain render function with no locking. Browsers start the context
+ * suspended until a gesture, so a one-shot handler resumes it on the first key or click.
+ *
+ * The context is asked for the engine's rate, but a browser may refuse and give its own
+ * (usually 48000). Feeding 22050 samples into a 48000 context plays them ~2x fast -- which
+ * sounds high pitched and wrong -- so the sink resamples from ctx.sampleRate to the engine
+ * rate whenever the two disagree. At the requested rate the ratio is 1 and this is a copy.
+ */
+EM_JS(void, _tiny_web_audio_open, (int rate), {
+  var ctx = new (window.AudioContext || window.webkitAudioContext)({sampleRate : rate});
+  var step = rate / ctx.sampleRate; /* engine frames per output frame */
+  var node = ctx.createScriptProcessor(2048, 0, 1);
+  node.onaudioprocess = function(event) {
+    var out = event.outputBuffer.getChannelData(0);
+    var frames = out.length;
+    /* One engine sample past the last needed output frame, so the interpolation has a pair. */
+    var need = Math.ceil(frames * step) + 1;
+    var ptr = _tiny_web_audio_buffer();
+    _tiny_web_audio_fill(need);
+    var heap = Module['HEAP16'] || HEAP16;
+    var base = ptr >> 1;
+    for (var i = 0; i < frames; i++) {
+      var position = i * step;
+      var index = position | 0;
+      var frac = position - index;
+      var a = heap[base + index];
+      var b = heap[base + index + 1];
+      out[i] = (a + (b - a) * frac) / 32768.0;
+    }
+  };
+  var source = ctx.createBufferSource();
+  source.connect(node);
+  node.connect(ctx.destination);
+  source.start(0);
+  document.addEventListener('keydown', function() { ctx.resume(); }, {once : true});
+  document.addEventListener('pointerdown', function() { ctx.resume(); }, {once : true});
+});
+
+/* Big enough for a worst-case low-rate context: 2048 output frames at 8000Hz wants 5645. */
+#define TINY_WEB_AUDIO_BUFFER 8192
+static int16_t _tiny_web_buffer[TINY_WEB_AUDIO_BUFFER];
+static tiny_game* _tiny_web_game;
+
+EMSCRIPTEN_KEEPALIVE int16_t* tiny_web_audio_buffer(void) { return _tiny_web_buffer; }
+
+EMSCRIPTEN_KEEPALIVE void tiny_web_audio_fill(int frames) {
+  if (frames > TINY_WEB_AUDIO_BUFFER) {
+    frames = TINY_WEB_AUDIO_BUFFER;
+  }
+  tiny_audio_render(_tiny_web_game, _tiny_web_buffer, frames);
+}
+
+static void _tiny_audio_open(tiny_game* game) {
+  _tiny_web_game = game;
+  _tiny_web_audio_open(TINY_AUDIO_RATE);
+}
+static void _tiny_audio_pump(tiny_game* game) { (void)game; }
+static void _tiny_audio_close(void) {}
+
+#elif defined(PNTR_APP_ESP32)
+/*
+ * The ESP32's built-in DAC in continuous mode: DMA clocks the samples out at exactly the
+ * mixer's rate, so a task only has to keep it fed. dac_continuous_write() blocks until there
+ * is room, which is what paces the task -- writing the DAC by hand cannot, because nothing
+ * on the CPU side holds a 45us sample period steadily.
+ *
+ * The task runs on core 0, away from the Arduino loop on core 1, so a slow frame never
+ * starves the speaker.
+ */
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+
+#include "driver/dac_continuous.h"
+#include "driver/gpio.h"
+
+#ifndef TINY_SPEAKER_PIN
+/** GPIO25 or GPIO26, the two DAC pins. The CYD's speaker amplifier hangs off GPIO26. */
+#define TINY_SPEAKER_PIN 26
+#endif
+
+/*
+ * Some boards gate the speaker amplifier with its own pin, and leave it off while that pin
+ * floats. Define TINY_SPEAKER_ENABLE_PIN to drive it to TINY_SPEAKER_ENABLE_LEVEL (low by
+ * default) before any sound plays. The single USB-C revision of the CYD needs GPIO4 low.
+ */
+#ifndef TINY_SPEAKER_ENABLE_LEVEL
+#define TINY_SPEAKER_ENABLE_LEVEL 0
+#endif
+#define TINY_AUDIO_BLOCK 256
+
+static tiny_game* _tiny_esp_game;
+static TaskHandle_t _tiny_audio_task;
+static dac_continuous_handle_t _tiny_dac;
+
+static void _tiny_audio_loop(void* argument) {
+  (void)argument;
+  int16_t block[TINY_AUDIO_BLOCK];
+  uint8_t out[TINY_AUDIO_BLOCK];
+  for (;;) {
+    tiny_audio_render(_tiny_esp_game, block, TINY_AUDIO_BLOCK);
+    /* The DAC is 8 bit unsigned, so silence is 128. */
+    for (int i = 0; i < TINY_AUDIO_BLOCK; i++) {
+      out[i] = (uint8_t)((block[i] >> 8) + 128);
+    }
+    dac_continuous_write(_tiny_dac, out, TINY_AUDIO_BLOCK, NULL, -1);
+  }
+}
+
+static void _tiny_audio_open(tiny_game* game) {
+  _tiny_esp_game = game;
+#ifdef TINY_SPEAKER_ENABLE_PIN
+  gpio_reset_pin((gpio_num_t)TINY_SPEAKER_ENABLE_PIN);
+  gpio_set_direction((gpio_num_t)TINY_SPEAKER_ENABLE_PIN, GPIO_MODE_OUTPUT);
+  gpio_set_level((gpio_num_t)TINY_SPEAKER_ENABLE_PIN, TINY_SPEAKER_ENABLE_LEVEL);
+#endif
+  dac_continuous_config_t config = {
+      .chan_mask = TINY_SPEAKER_PIN == 25 ? DAC_CHANNEL_MASK_CH0 : DAC_CHANNEL_MASK_CH1,
+      .desc_num = 4,
+      .buf_size = TINY_AUDIO_BLOCK,
+      .freq_hz = TINY_AUDIO_RATE,
+      .offset = 0,
+      .clk_src = DAC_DIGI_CLK_SRC_DEFAULT,
+      .chan_mode = DAC_CHANNEL_MODE_SIMUL,
+  };
+  if (dac_continuous_new_channels(&config, &_tiny_dac) != ESP_OK || dac_continuous_enable(_tiny_dac) != ESP_OK) {
+#ifndef TINY_NO_STDIO
+    _tiny_log(PNTR_APP_LOG_ERROR, "tinyengine: could not open the DAC on GPIO%d", TINY_SPEAKER_PIN);
+#endif
+    _tiny_dac = NULL;
+    return;
+  }
+  xTaskCreatePinnedToCore(_tiny_audio_loop, "tiny_audio", 4096, NULL, 5, &_tiny_audio_task, 0);
+}
+static void _tiny_audio_pump(tiny_game* game) { (void)game; }
+
+static void _tiny_audio_close(void) {
+  if (_tiny_audio_task != NULL) {
+    vTaskDelete(_tiny_audio_task);
+    _tiny_audio_task = NULL;
+  }
+  if (_tiny_dac != NULL) {
+    dac_continuous_disable(_tiny_dac);
+    dac_continuous_del_channels(_tiny_dac);
+    _tiny_dac = NULL;
+  }
+}
+#endif
+
+/*-- touch controls -------------------------------------------------------------------------*/
+
+#ifdef TINY_TOUCH_CONTROLS
+/*
+ * A d-pad bottom left and A/B bottom right, scaled off the short side of the screen. The
+ * d-pad answers anywhere near it, diagonals included, so a thumb can slide around on it
+ * without having to land on an arm exactly.
+ */
+typedef struct _tiny_touch_layout {
+  float unit;
+  float dpad_x, dpad_y;
+  float a_x, a_y;
+  float b_x, b_y;
+} _tiny_touch_layout;
+
+static _tiny_touch_layout _tiny_touch_place(tiny_game* game) {
+  _tiny_touch_layout layout;
+  float unit = (float)TINY_MIN(game->screen_w, game->screen_h) / 8.0f;
+  float margin = 4.0f;
+  layout.unit = unit;
+  layout.dpad_x = margin + unit * 1.5f;
+  layout.dpad_y = (float)game->screen_h - margin - unit * 1.5f;
+  layout.a_x = (float)game->screen_w - margin - unit * 0.8f;
+  layout.a_y = (float)game->screen_h - margin - unit * 2.0f;
+  layout.b_x = (float)game->screen_w - margin - unit * 2.2f;
+  layout.b_y = (float)game->screen_h - margin - unit * 0.9f;
+  return layout;
+}
+
+/* The gamepad buttons one finger at (x, y) is holding, as TINY_BUTTON_BIT bits. */
+static uint32_t _tiny_touch_hit(const _tiny_touch_layout* layout, float x, float y) {
+  float unit = layout->unit;
+  float dx = x - layout->dpad_x;
+  float dy = y - layout->dpad_y;
+  if (dx * dx + dy * dy < unit * unit * 2.2f * 2.2f) {
+    uint32_t held = 0;
+    float dead = unit * 0.35f;
+    if (dx < -dead && -dx > fabsf(dy) * 0.5f) {
+      held |= TINY_BUTTON_BIT(PNTR_APP_GAMEPAD_BUTTON_LEFT);
+    }
+    if (dx > dead && dx > fabsf(dy) * 0.5f) {
+      held |= TINY_BUTTON_BIT(PNTR_APP_GAMEPAD_BUTTON_RIGHT);
+    }
+    if (dy < -dead && -dy > fabsf(dx) * 0.5f) {
+      held |= TINY_BUTTON_BIT(PNTR_APP_GAMEPAD_BUTTON_UP);
+    }
+    if (dy > dead && dy > fabsf(dx) * 0.5f) {
+      held |= TINY_BUTTON_BIT(PNTR_APP_GAMEPAD_BUTTON_DOWN);
+    }
+    return held;
+  }
+
+  /* The two buttons' reach overlaps, so the nearer one wins. */
+  float ax = x - layout->a_x, ay = y - layout->a_y;
+  float bx = x - layout->b_x, by = y - layout->b_y;
+  float a = ax * ax + ay * ay;
+  float b = bx * bx + by * by;
+  float reach = unit * unit * 1.1f * 1.1f;
+  if (a < reach && a <= b) {
+    return TINY_BUTTON_BIT(PNTR_APP_GAMEPAD_BUTTON_A);
+  }
+  if (b < reach) {
+    return TINY_BUTTON_BIT(PNTR_APP_GAMEPAD_BUTTON_B);
+  }
+  return 0;
+}
+
+#ifdef PNTR_APP_WEB
+#include <emscripten/html5.h>
+
+/*
+ * pntr_app's web backend only listens for the mouse, and a phone only makes mouse events
+ * for a tap: nothing while a finger is held down, and never for two fingers. So the engine
+ * reads touches itself, which is what lets you hold the d-pad and press A at the same time.
+ */
+EM_JS(float, _tiny_web_canvas_scale_x, (int width), { return width / Module['canvas'].getBoundingClientRect().width; });
+EM_JS(float, _tiny_web_canvas_scale_y, (int height), { return height / Module['canvas'].getBoundingClientRect().height; });
+
+static EM_BOOL _tiny_web_touch(int type, const EmscriptenTouchEvent* event, void* user) {
+  tiny_game* game = (tiny_game*)user;
+  bool ending = type == EMSCRIPTEN_EVENT_TOUCHEND || type == EMSCRIPTEN_EVENT_TOUCHCANCEL;
+  float sx = _tiny_web_canvas_scale_x(game->screen_w);
+  float sy = _tiny_web_canvas_scale_y(game->screen_h);
+  game->touch_count = 0;
+  for (int i = 0; i < event->numTouches && game->touch_count < TINY_MAX_TOUCHES; i++) {
+    const EmscriptenTouchPoint* touch = &event->touches[i];
+    /* On a touchend, the changed touches are the fingers that just lifted. */
+    if (ending && touch->isChanged) {
+      continue;
+    }
+    game->touch_x[game->touch_count] = (float)touch->targetX * sx;
+    game->touch_y[game->touch_count] = (float)touch->targetY * sy;
+    game->touch_count++;
+  }
+  /* A touch screen has shown itself, so the controls are worth drawing now. */
+  game->touch_visible = true;
+  /* Handled, which also stops the browser scrolling and faking mouse events from it. */
+  return EM_TRUE;
+}
+
+static void _tiny_touch_open(tiny_game* game) {
+  emscripten_set_touchstart_callback("!canvas", game, true, _tiny_web_touch);
+  emscripten_set_touchmove_callback("!canvas", game, true, _tiny_web_touch);
+  emscripten_set_touchend_callback("!canvas", game, true, _tiny_web_touch);
+  emscripten_set_touchcancel_callback("!canvas", game, true, _tiny_web_touch);
+}
+#else
+/* Elsewhere a touch screen arrives as the mouse, and there is no keyboard to fall back on. */
+static void _tiny_touch_open(tiny_game* game) { game->touch_visible = true; }
+#endif
+
+static void _tiny_touch_update(tiny_game* game) {
+  _tiny_touch_layout layout = _tiny_touch_place(game);
+  game->touch_buttons = 0;
+  for (int i = 0; i < game->touch_count; i++) {
+    game->touch_buttons |= _tiny_touch_hit(&layout, game->touch_x[i], game->touch_y[i]);
+  }
+  if (pntr_app_mouse_button_down(game->app, PNTR_APP_MOUSE_BUTTON_LEFT)) {
+    game->touch_buttons |= _tiny_touch_hit(&layout, pntr_app_mouse_x(game->app), pntr_app_mouse_y(game->app));
+  }
+}
+
+/*
+ * One span per row, so a translucent colour covers every pixel exactly once. pntr's own
+ * circle and rounded fills paint some rows twice, which shows as a brighter stripe.
+ */
+static void _tiny_fill_circle(pntr_image* screen, int cx, int cy, int radius, pntr_color color) {
+  for (int dy = -radius; dy <= radius; dy++) {
+    int half = (int)sqrtf((float)(radius * radius - dy * dy));
+    pntr_draw_rectangle_fill(screen, cx - half, cy + dy, half * 2 + 1, 1, color);
+  }
+}
+
+static void _tiny_draw_touch(tiny_game* game, pntr_image* screen) {
+  if (!game->touch_visible) {
+    return;
+  }
+  _tiny_touch_layout layout = _tiny_touch_place(game);
+  pntr_color idle = pntr_new_color(255, 255, 255, 60);
+  pntr_color down = pntr_new_color(255, 255, 255, 150);
+  int unit = (int)layout.unit;
+  int cx = (int)layout.dpad_x - unit / 2;
+  int cy = (int)layout.dpad_y - unit / 2;
+
+  /* The d-pad: a centre square and four arms, each lit while it is held. */
+  static const struct {
+    int dx, dy;
+    pntr_app_gamepad_button button;
+  } arms[] = {{-1, 0, PNTR_APP_GAMEPAD_BUTTON_LEFT},
+              {1, 0, PNTR_APP_GAMEPAD_BUTTON_RIGHT},
+              {0, -1, PNTR_APP_GAMEPAD_BUTTON_UP},
+              {0, 1, PNTR_APP_GAMEPAD_BUTTON_DOWN}};
+  pntr_draw_rectangle_fill(screen, cx, cy, unit, unit, idle);
+  for (int i = 0; i < 4; i++) {
+    bool held = (game->touch_buttons & TINY_BUTTON_BIT(arms[i].button)) != 0;
+    pntr_draw_rectangle_fill(screen, cx + arms[i].dx * unit, cy + arms[i].dy * unit, unit, unit, held ? down : idle);
+  }
+
+  static const char* labels[] = {"A", "B"};
+  float xs[] = {layout.a_x, layout.b_x};
+  float ys[] = {layout.a_y, layout.b_y};
+  pntr_app_gamepad_button buttons[] = {PNTR_APP_GAMEPAD_BUTTON_A, PNTR_APP_GAMEPAD_BUTTON_B};
+  for (int i = 0; i < 2; i++) {
+    bool held = (game->touch_buttons & TINY_BUTTON_BIT(buttons[i])) != 0;
+    _tiny_fill_circle(screen, (int)xs[i], (int)ys[i], (int)(layout.unit * 0.8f), held ? down : idle);
+    if (game->font != NULL) {
+      pntr_vector size = pntr_measure_text_ex(game->font, labels[i], 1);
+      pntr_draw_text(screen, game->font, labels[i], (int)xs[i] - size.x / 2, (int)ys[i] - size.y / 2, PNTR_WHITE);
+    }
+  }
+}
+#endif
+
+/*-- input ----------------------------------------------------------------------------------*/
+
+bool tiny_held(tiny_game* game, pntr_app_key key, pntr_app_gamepad_button button) {
+  return pntr_app_key_down(game->app, key) || pntr_app_gamepad_button_down(game->app, 0, button) ||
+         (game->touch_buttons & TINY_BUTTON_BIT(button)) != 0;
+}
+
+float tiny_axis_x(tiny_game* game) {
+  return (tiny_held(game, PNTR_APP_KEY_RIGHT, PNTR_APP_GAMEPAD_BUTTON_RIGHT) ? 1.0f : 0.0f) -
+         (tiny_held(game, PNTR_APP_KEY_LEFT, PNTR_APP_GAMEPAD_BUTTON_LEFT) ? 1.0f : 0.0f);
+}
+
+float tiny_axis_y(tiny_game* game) {
+  return (tiny_held(game, PNTR_APP_KEY_DOWN, PNTR_APP_GAMEPAD_BUTTON_DOWN) ? 1.0f : 0.0f) -
+         (tiny_held(game, PNTR_APP_KEY_UP, PNTR_APP_GAMEPAD_BUTTON_UP) ? 1.0f : 0.0f);
+}
+
+/*-- messages -------------------------------------------------------------------------------*/
+
+void tiny_say(tiny_game* game, const char* text, float seconds) {
+  game->message = text;
+  game->message_timer = seconds;
+}
+
+/*
+ * Greedy word wrap. A whole sentence does not fit across a small screen, and the default
+ * font has no smaller size, so the only way to show one is to break it over several lines.
+ *
+ * Pass a NULL screen to count the lines without drawing, which is how the box behind the
+ * text gets sized before the text goes into it.
+ */
+static int _tiny_wrap(pntr_image* screen, pntr_font* font, const char* text, int x, int y, int max_width,
+                      int* widest) {
+  char line[80];
+  int length = 0;
+  int lines = 0;
+  int line_height = pntr_measure_text_ex(font, "A", 1).y + 1;
+  const char* cursor = text;
+  *widest = 0;
+
+  while (*cursor != '\0' || length > 0) {
+    if (*cursor != '\0') {
+      const char* word_end = cursor;
+      while (*word_end != '\0' && *word_end != ' ') {
+        word_end++;
+      }
+      int word_length = (int)(word_end - cursor);
+
+      /* Try the word on the current line, with a space in front of it if it is not the first. */
+      int end = length > 0 ? length + 1 : 0;
+      int take = TINY_MIN(word_length, (int)sizeof(line) - 1 - end);
+      if (take == word_length || length == 0) {
+        if (length > 0) {
+          line[length] = ' ';
+        }
+        TINY_MEMCPY(line + end, cursor, (size_t)take);
+        line[end + take] = '\0';
+
+        /* A word wider than the whole box still goes on its own line rather than looping. */
+        if (length == 0 || pntr_measure_text(font, line) <= max_width) {
+          length = end + take;
+          cursor = (*word_end == ' ') ? word_end + 1 : word_end;
+          continue;
+        }
+      }
+      line[length] = '\0';
+    }
+
+    if (screen != NULL) {
+      pntr_draw_text(screen, font, line, x, y + lines * line_height, PNTR_WHITE);
+    }
+    *widest = TINY_MAX(*widest, pntr_measure_text(font, line));
+    lines++;
+    length = 0;
+  }
+  return lines;
+}
+
+static void _tiny_draw_message(tiny_game* game, pntr_image* screen) {
+  if (game->message_timer <= 0.0f || game->message == NULL || game->font == NULL) {
+    return;
+  }
+  int max_width = screen->width - 12;
+  int line_height = pntr_measure_text_ex(game->font, "A", 1).y + 1;
+  int widest = 0;
+  int lines = _tiny_wrap(NULL, game->font, game->message, 0, 0, max_width, &widest);
+
+  /* The box hugs the text rather than spanning the screen, so a short word is not a full bar. */
+  int height = lines * line_height + 5;
+  int width = widest + 6;
+  int left = (screen->width - width) / 2;
+  int top = screen->height - height - 3;
+
+  pntr_draw_rectangle_fill(screen, left, top, width, height, PNTR_BLACK);
+  _tiny_wrap(screen, game->font, game->message, left + 3, top + 3, max_width, &widest);
+}
+
+/*-- portals --------------------------------------------------------------------------------*/
+
+/*
+ * A portal has to see the player standing clear of it before it will fire. Landing on a
+ * doorway therefore does nothing until you walk out of it, which is what stops a door you
+ * just came through from throwing you straight back -- otherwise holding a direction bounces
+ * you between two maps forever.
+ */
+static void _tiny_portal(tiny_game* game, tiny_object* obj) {
+  if (game->player == NULL || !tiny_overlaps(obj, game->player)) {
+    obj->portal = 1;
+    return;
+  }
+  if (obj->portal == 0) {
+    return;
+  }
+  obj->portal = 0;
+  const char* destination = tiny_obj_str(obj, "destination", NULL);
+  if (destination != NULL && tiny_goto_map(game, destination, tiny_obj_str(obj, "spawn", NULL))) {
+    const char* sound = tiny_obj_str(obj, "sound", NULL);
+    if (sound != NULL) {
+      tiny_sound_play(game, sound, false);
     }
   }
 }
@@ -1763,6 +2416,15 @@ bool tiny_goto_map(tiny_game* game, const char* name, const char* spawn) {
 
 /*-- lifecycle ------------------------------------------------------------------------------*/
 
+/*
+ * pntr_app's web backend drops every keystroke when the app has no event hook, before it
+ * reaches the keysDown[] array the engine polls. An empty hook is enough to keep them.
+ */
+static void _tiny_ignore_event(pntr_app* app, pntr_app_event* event) {
+  (void)app;
+  (void)event;
+}
+
 tiny_game* tiny_init(pntr_app* app, const tiny_game_def* def, void* user) {
   if (def == NULL || def->maps == NULL || def->map_count == 0) {
 #ifndef TINY_NO_STDIO
@@ -1794,6 +2456,14 @@ tiny_game* tiny_init(pntr_app* app, const tiny_game_def* def, void* user) {
   game->sound_count = def->sound_count;
   game->screen_w = pntr_app_width(app);
   game->screen_h = pntr_app_height(app);
+  game->font = pntr_load_font_default();
+  if (app->event == NULL) {
+    app->event = _tiny_ignore_event;
+  }
+  _tiny_audio_open(game);
+#ifdef TINY_TOUCH_CONTROLS
+  _tiny_touch_open(game);
+#endif
 
   const tiny_map* start = def->start_map != NULL ? tiny_find_map(game, def->start_map) : NULL;
   _tiny_load_map(game, start != NULL ? start : def->maps[0], NULL);
@@ -1807,11 +2477,16 @@ void tiny_unload(tiny_game* game) {
   if (game->def != NULL && game->def->leave != NULL && game->map != NULL) {
     game->def->leave(game);
   }
+  _tiny_audio_close();
   for (int i = 0; i < TINY_MAX_VOICES; i++) {
     if (game->voices[i].active) {
       _tiny_voice_stop(&game->voices[i]);
     }
   }
+  for (int i = 0; i < TINY_MAX_SFX; i++) {
+    pntr_unload_memory(game->sfx[i].samples);
+  }
+  pntr_unload_font(game->font);
   pntr_unload_memory(game->objects);
   pntr_unload_memory(game);
 }
@@ -1820,8 +2495,13 @@ void tiny_update(tiny_game* game, float dt) {
   if (game == NULL || game->map == NULL) {
     return;
   }
+  dt = TINY_MIN(dt, 0.05f);
   game->time += dt;
   game->anim_time += dt;
+  game->message_timer -= dt;
+#ifdef TINY_TOUCH_CONTROLS
+  _tiny_touch_update(game);
+#endif
 
   if (game->def->object != NULL) {
     /*
@@ -1834,6 +2514,13 @@ void tiny_update(tiny_game* game, float dt) {
       if (obj->active) {
         game->def->object(game, obj, dt);
       }
+    }
+  }
+
+  for (uint16_t i = 0; i < game->object_count; i++) {
+    tiny_object* obj = &game->objects[i];
+    if (obj->active && tiny_is(obj, "portal")) {
+      _tiny_portal(game, obj);
     }
   }
 
@@ -1853,6 +2540,8 @@ void tiny_update(tiny_game* game, float dt) {
     game->pending_spawn = NULL;
     _tiny_load_map(game, map, spawn);
   }
+
+  _tiny_audio_pump(game);
 }
 
 /*-- drawing --------------------------------------------------------------------------------*/
@@ -2037,6 +2726,10 @@ void tiny_draw(tiny_game* game, pntr_image* screen) {
   if (game->def->draw != NULL) {
     game->def->draw(game, screen);
   }
+  _tiny_draw_message(game, screen);
+#ifdef TINY_TOUCH_CONTROLS
+  _tiny_draw_touch(game, screen);
+#endif
 }
 
 #ifdef __cplusplus

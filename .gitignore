@@ -1,5 +1,6 @@
 build*/
 .pio/
 __pycache__/
+.venv/
 *.o
 .DS_Store

@@ -98,6 +98,7 @@ static const tiny_layer tiny_cave_layers[3] = {
 static const tiny_prop tiny_cave_obj2_props[] = {
   { .name = "destination", .hash = 0xB2DE64BFU, .type = 3, .as = { .s = "town" } },
   { .name = "spawn", .hash = 0x3A224D98U, .type = 3, .as = { .s = "from_cave" } },
+  { .name = "sound", .hash = 0x0E0D9594U, .type = 3, .as = { .s = "blip" } },
 };
 
 static const tiny_prop tiny_cave_obj3_props[] = {
@@ -128,7 +129,7 @@ static const tiny_object_def tiny_cave_objects[10] = {
   { .name = "exit", .type = "portal", .name_hash = 0xCDED1A85U, .type_hash = 0x150C5D8BU, .id = 18,
     .x = 304.0f, .y = 104.0f, .w = 8.0f, .h = 8.0f,
     .tile = 0, .shape = TINY_SHAPE_RECT, .layer = 2, .visible = true,
-    .props = { .items = tiny_cave_obj2_props, .count = 2 } },
+    .props = { .items = tiny_cave_obj2_props, .count = 3 } },
   { .name = "bat0", .type = "enemy", .name_hash = 0x08CAF848U, .type_hash = 0x69EA6DABU, .id = 19,
     .x = 96.0f, .y = 40.0f, .w = 8.0f, .h = 8.0f,
     .tile = 19, .shape = TINY_SHAPE_TILE, .layer = 2, .visible = true,

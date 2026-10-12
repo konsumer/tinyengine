@@ -338,7 +338,7 @@
    "name": "things",
    "objects": [
     {
-     "id": 87,
+     "id": 76,
      "name": "player",
      "type": "player",
      "rotation": 0,
@@ -350,7 +350,7 @@
      "gid": 8
     },
     {
-     "id": 88,
+     "id": 77,
      "name": "from_town",
      "type": "spawn",
      "rotation": 0,
@@ -362,7 +362,7 @@
      "point": true
     },
     {
-     "id": 89,
+     "id": 78,
      "name": "goal",
      "type": "portal",
      "rotation": 0,
@@ -381,11 +381,16 @@
        "name": "spawn",
        "type": "string",
        "value": "from_pyramid"
+      },
+      {
+       "name": "sound",
+       "type": "string",
+       "value": "blip"
       }
      ]
     },
     {
-     "id": 90,
+     "id": 79,
      "name": "hopper0",
      "type": "enemy",
      "rotation": 0,
@@ -404,7 +409,7 @@
      ]
     },
     {
-     "id": 91,
+     "id": 80,
      "name": "hopper1",
      "type": "enemy",
      "rotation": 0,
@@ -423,7 +428,7 @@
      ]
     },
     {
-     "id": 92,
+     "id": 81,
      "name": "hopper2",
      "type": "enemy",
      "rotation": 0,
@@ -450,7 +455,7 @@
   }
  ],
  "nextlayerid": 4,
- "nextobjectid": 93,
+ "nextobjectid": 82,
  "orientation": "isometric",
  "properties": [
   {

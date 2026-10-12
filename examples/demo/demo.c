@@ -12,7 +12,6 @@
 
 #include <math.h>
 #include <stdio.h>
-#include <string.h>
 
 /*
  * These four have to be included in this order, so they are fenced off from clang-format's
@@ -44,66 +43,22 @@
 #include "generated/game_maps.h"
 /* clang-format on */
 
-typedef struct DemoState {
-  pntr_font* font;
-  int score;
-  float message_timer;
-  const char* message;
-} DemoState;
+static int score;
 
 /* Which way the player last faced, so standing still keeps the right sprite. */
 enum { FACE_DOWN = 0,
        FACE_UP,
        FACE_SIDE };
 
-/* A portal's arming state, kept in tiny_object::state. */
-enum { PORTAL_NEW = 0,
-       PORTAL_READY,
-       PORTAL_BLOCKED };
-
 #define WALK_SPEED 44.0f /* Pixels per second on an orthogonal map. */
 #define ISO_SPEED 2.6f   /* Tiles per second on an isometric one. */
 #define JUMP_SPEED 175.0f
 
-/*--------------------------------------------------------------------------------------------
- * Input, read straight off the pntr_app the engine is holding.
- *------------------------------------------------------------------------------------------*/
-
-static bool Held(tiny_game* game, pntr_app_key key, pntr_app_gamepad_button button) {
-  return pntr_app_key_down(game->app, key) || pntr_app_gamepad_button_down(game->app, 0, button);
-}
-
-static float AxisX(tiny_game* game) {
-  float axis = 0.0f;
-  if (Held(game, PNTR_APP_KEY_LEFT, PNTR_APP_GAMEPAD_BUTTON_LEFT)) {
-    axis -= 1.0f;
-  }
-  if (Held(game, PNTR_APP_KEY_RIGHT, PNTR_APP_GAMEPAD_BUTTON_RIGHT)) {
-    axis += 1.0f;
-  }
-  return axis;
-}
-
-static float AxisY(tiny_game* game) {
-  float axis = 0.0f;
-  if (Held(game, PNTR_APP_KEY_UP, PNTR_APP_GAMEPAD_BUTTON_UP)) {
-    axis -= 1.0f;
-  }
-  if (Held(game, PNTR_APP_KEY_DOWN, PNTR_APP_GAMEPAD_BUTTON_DOWN)) {
-    axis += 1.0f;
-  }
-  return axis;
-}
-
-static bool JumpPressed(tiny_game* game) {
-  return Held(game, PNTR_APP_KEY_SPACE, PNTR_APP_GAMEPAD_BUTTON_A) ||
-         Held(game, PNTR_APP_KEY_Z, PNTR_APP_GAMEPAD_BUTTON_B);
-}
-
-static void Say(tiny_game* game, const char* message) {
-  DemoState* state = (DemoState*)game->user;
-  state->message = message;
-  state->message_timer = 2.5f;
+/* Anything that hurts the player starts the map over, back where the map put them. */
+static void Hurt(tiny_game* game, const char* message) {
+  tiny_goto_map(game, game->map->name, NULL);
+  tiny_sound_play(game, "hurt", false);
+  tiny_say(game, message, 2.5f);
 }
 
 /*--------------------------------------------------------------------------------------------
@@ -111,11 +66,14 @@ static void Say(tiny_game* game, const char* message) {
  *------------------------------------------------------------------------------------------*/
 
 static void PlayerPlatformer(tiny_game* game, tiny_object* self, float dt) {
-  float axis = AxisX(game);
+  float axis = tiny_axis_x(game);
   self->vx = axis * WALK_SPEED * 1.6f;
 
   if (game->gravity > 0.0f) {
-    if (self->on_ground && JumpPressed(game)) {
+    /* Up jumps too, so a single-touch screen can run and jump with one finger on the d-pad. */
+    bool jump = tiny_held(game, PNTR_APP_KEY_SPACE, PNTR_APP_GAMEPAD_BUTTON_A) ||
+                tiny_held(game, PNTR_APP_KEY_Z, PNTR_APP_GAMEPAD_BUTTON_B) || tiny_axis_y(game) < 0.0f;
+    if (self->on_ground && jump) {
       self->vy = -JUMP_SPEED;
       self->on_ground = false;
       tiny_sound_play(game, "jump", false);
@@ -127,7 +85,7 @@ static void PlayerPlatformer(tiny_game* game, tiny_object* self, float dt) {
      * The map turned gravity off, so this is a side shooter rather than a platformer.
      * Nothing falls, a jump has nothing to push against, and up/down simply fly.
      */
-    self->vy = AxisY(game) * WALK_SPEED * 1.6f;
+    self->vy = tiny_axis_y(game) * WALK_SPEED * 1.6f;
     tiny_move(game, self, self->vx * dt, self->vy * dt);
   }
 
@@ -147,15 +105,13 @@ static void PlayerPlatformer(tiny_game* game, tiny_object* self, float dt) {
   tiny_world_to_tile(game, self->x + self->w * 0.5f, self->y + self->h - 1.0f, &tx, &ty);
   bool burned = (tiny_flags_at(game, tx, ty) & TINY_TILE_HAZARD) != 0;
   if (burned || self->y > (float)(game->map->height * game->map->tile_h)) {
-    tiny_goto_map(game, game->map->name, "from_town");
-    tiny_sound_play(game, "hurt", false);
-    Say(game, "ouch");
+    Hurt(game, "ouch!");
   }
 }
 
 static void PlayerTopDown(tiny_game* game, tiny_object* self, float dt) {
-  float dx = AxisX(game);
-  float dy = AxisY(game);
+  float dx = tiny_axis_x(game);
+  float dy = tiny_axis_y(game);
   /* Normalise the diagonal so walking at an angle is not faster than walking straight. */
   if (dx != 0.0f && dy != 0.0f) {
     dx *= 0.7071f;
@@ -185,6 +141,12 @@ static void PlayerTopDown(tiny_game* game, tiny_object* self, float dt) {
   } else {
     tiny_pose(game, self, anim, 0);
   }
+
+  int tx, ty;
+  tiny_world_to_tile(game, self->x + self->w * 0.5f, self->y + self->h * 0.5f, &tx, &ty);
+  if ((tiny_flags_at(game, tx, ty) & TINY_TILE_HAZARD) != 0) {
+    Hurt(game, "ouch!");
+  }
 }
 
 static void PlayerIsometric(tiny_game* game, tiny_object* self, float dt) {
@@ -192,8 +154,8 @@ static void PlayerIsometric(tiny_game* game, tiny_object* self, float dt) {
    * On screen the world is rotated 45 degrees, so the arrow keys are rotated to match:
    * pressing up should walk towards the top of the screen, not along a tile axis.
    */
-  float sx = AxisX(game);
-  float sy = AxisY(game);
+  float sx = tiny_axis_x(game);
+  float sy = tiny_axis_y(game);
   float dx = (sy + sx) * 0.7071f;
   float dy = (sy - sx) * 0.7071f;
 
@@ -230,9 +192,12 @@ static void Patrol(tiny_game* game, tiny_object* self, float dt) {
   float dx = (float)self->state * speed * dt;
 
   if (game->map->type == TINY_MAP_PLATFORMER && game->gravity > 0.0f) {
-    /* Turn at a ledge as well as at a wall, so nothing walks off into the lava. */
-    float ahead = self->state > 0 ? self->x + self->w + 1.0f : self->x - 1.0f;
-    if (!tiny_solid(game, ahead, self->y + self->h + 1.0f)) {
+    /* Turn at a ledge as well as at a wall, so nothing walks off into the lava. A one-way
+       platform is floor too, even though it is not solid. */
+    int tx, ty;
+    tiny_world_to_tile(game, self->state > 0 ? self->x + self->w + 1.0f : self->x - 1.0f, self->y + self->h + 1.0f,
+                       &tx, &ty);
+    if ((tiny_flags_at(game, tx, ty) & (TINY_TILE_SOLID | TINY_TILE_PLATFORM)) == 0) {
       self->state = -self->state;
       dx = -dx;
     }
@@ -252,7 +217,8 @@ static void Patrol(tiny_game* game, tiny_object* self, float dt) {
 /* Steps towards the player on whichever axis is furthest away, and gives up if blocked. */
 static void Chase(tiny_game* game, tiny_object* self, float dt) {
   tiny_object* player = game->player;
-  if (player == NULL) {
+  /* game->time restarts with the map, so this gives the player a head start after a death. */
+  if (player == NULL || game->time < 1.5f) {
     return;
   }
   float speed = tiny_obj_float(self, "speed", 24.0f);
@@ -274,8 +240,6 @@ static void Chase(tiny_game* game, tiny_object* self, float dt) {
 }
 
 void Behaviour(tiny_game* game, tiny_object* self, float dt) {
-  DemoState* state = (DemoState*)game->user;
-
   if (tiny_is(self, "player")) {
     Player(game, self, dt);
     return;
@@ -284,8 +248,7 @@ void Behaviour(tiny_game* game, tiny_object* self, float dt) {
   if (tiny_is(self, "enemy")) {
     Patrol(game, self, dt);
     if (tiny_overlaps(self, game->player)) {
-      tiny_sound_play(game, "hurt", false);
-      Say(game, "bumped an enemy");
+      Hurt(game, "bumped an enemy");
     }
     return;
   }
@@ -293,8 +256,7 @@ void Behaviour(tiny_game* game, tiny_object* self, float dt) {
   if (tiny_is(self, "ghost")) {
     Chase(game, self, dt);
     if (tiny_overlaps(self, game->player)) {
-      tiny_sound_play(game, "laser", false);
-      Say(game, "caught!");
+      Hurt(game, "caught!");
     }
     return;
   }
@@ -303,174 +265,43 @@ void Behaviour(tiny_game* game, tiny_object* self, float dt) {
     /* The bob is cosmetic: nudge the sprite, leave the collision box where it was. */
     self->y += sinf(game->time * 4.0f + (float)self->def->id) * 4.0f * dt;
     if (tiny_overlaps(self, game->player)) {
-      state->score += tiny_is(self, "coin") ? 10 : 1;
+      score += tiny_is(self, "coin") ? 10 : 1;
       tiny_sound_play(game, "coin", false);
       tiny_kill(game, self);
     }
     return;
   }
 
-  if (tiny_is(self, "portal")) {
-    /*
-     * A portal has to see the player standing clear of it before it will fire. Landing on a
-     * doorway therefore does nothing until you walk out of it, which is what stops a door
-     * you just came through from throwing you straight back -- otherwise holding a direction
-     * bounces you between two maps forever.
-     */
-    if (!tiny_overlaps(self, game->player)) {
-      self->state = PORTAL_READY;
-    } else if (self->state == PORTAL_NEW) {
-      self->state = PORTAL_BLOCKED;
-    } else if (self->state == PORTAL_READY) {
-      const char* destination = tiny_obj_str(self, "destination", NULL);
-      if (destination != NULL) {
-        tiny_goto_map(game, destination, tiny_obj_str(self, "spawn", NULL));
-        tiny_sound_play(game, "blip", false);
-      }
-      self->state = PORTAL_BLOCKED;
-    }
-    return;
-  }
-
   if (tiny_is(self, "npc")) {
-    /* Say your piece when the player is close, which is as much dialogue as this demo has. */
+    /*
+     * Say your piece when the player is right next to you, which is as much dialogue as this
+     * demo has. state remembers they were already close, so the blip plays once per visit.
+     */
     if (game->player != NULL) {
       float dx = game->player->x - self->x;
       float dy = game->player->y - self->y;
-      if (dx * dx + dy * dy < 24.0f * 24.0f) {
-        Say(game, tiny_obj_str(self, "says", "..."));
+      bool close = dx * dx + dy * dy < 12.0f * 12.0f;
+      if (close) {
+        if (self->state == 0) {
+          tiny_sound_play(game, "blip", false);
+        }
+        tiny_say(game, tiny_obj_str(self, "says", "..."), 2.5f);
       }
+      self->state = close ? 1 : 0;
     }
     return;
   }
 }
 
 /*--------------------------------------------------------------------------------------------
- * The overlay, and the two hooks the demo bothers with
+ * The HUD, and pntr_app glue
  *------------------------------------------------------------------------------------------*/
 
-void Enter(tiny_game* game) {
-  DemoState* state = (DemoState*)game->user;
-  state->message = game->map->name;
-  state->message_timer = 1.5f;
-  /* One loop of the theme for the whole run, not one per map. */
-  if (!tiny_sound_playing(game, "theme")) {
-    tiny_sound_play(game, "theme", true);
-  }
-}
-
-/*
- * Greedy word wrap. A whole sentence does not fit across 160 pixels, and the default font
- * has no smaller size, so the only way to show one is to break it over several lines.
- *
- * Pass a NULL screen to count the lines without drawing, which is how the box behind the
- * text gets sized before the text goes into it.
- */
-static int WrapText(pntr_image* screen, pntr_font* font, const char* text, int x, int y, int max_width,
-                    int* widest) {
-  char line[80];
-  int length = 0;
-  int lines = 0;
-  int line_height = pntr_measure_text_ex(font, "A", 1).y + 1;
-  const char* cursor = text;
-  if (widest != NULL) {
-    *widest = 0;
-  }
-
-  while (*cursor != '\0') {
-    const char* word_end = cursor;
-    while (*word_end != '\0' && *word_end != ' ') {
-      word_end++;
-    }
-    int word_length = (int)(word_end - cursor);
-
-    /* Try the word on the current line, with a space in front of it if it is not the first. */
-    int needed = length + (length > 0 ? 1 : 0) + word_length + 1;
-    if (needed <= (int)sizeof(line)) {
-      int end = length;
-      if (end > 0) {
-        line[end++] = ' ';
-      }
-      memcpy(line + end, cursor, (size_t)word_length);
-      line[end + word_length] = '\0';
-
-      /* A word wider than the whole box still goes on its own line rather than looping. */
-      if (length == 0 || pntr_measure_text(font, line) <= max_width) {
-        length = end + word_length;
-        cursor = (*word_end == ' ') ? word_end + 1 : word_end;
-        continue;
-      }
-      line[length] = '\0';
-    }
-
-    if (screen != NULL) {
-      pntr_draw_text(screen, font, line, x, y + lines * line_height, PNTR_WHITE);
-    }
-    if (widest != NULL) {
-      int measured = pntr_measure_text(font, line);
-      *widest = measured > *widest ? measured : *widest;
-    }
-    lines++;
-    length = 0;
-  }
-
-  if (length > 0) {
-    if (screen != NULL) {
-      pntr_draw_text(screen, font, line, x, y + lines * line_height, PNTR_WHITE);
-    }
-    if (widest != NULL) {
-      int measured = pntr_measure_text(font, line);
-      *widest = measured > *widest ? measured : *widest;
-    }
-    lines++;
-  }
-  return lines;
-}
-
-void Overlay(tiny_game* game, pntr_image* screen) {
-  DemoState* state = (DemoState*)game->user;
-  if (state->font == NULL) {
-    return;
-  }
-
+void Hud(tiny_game* game, pntr_image* screen) {
   char line[48];
-  snprintf(line, sizeof(line), "%s  %d", game->map->name, state->score);
-  pntr_draw_text(screen, state->font, line, 3, 3, PNTR_BLACK);
-  pntr_draw_text(screen, state->font, line, 2, 2, PNTR_WHITE);
-
-  if (state->message_timer > 0.0f && state->message != NULL) {
-    int max_width = screen->width - 12;
-    int line_height = pntr_measure_text_ex(state->font, "A", 1).y + 1;
-    int widest = 0;
-    int lines = WrapText(NULL, state->font, state->message, 0, 0, max_width, &widest);
-
-    /* The box hugs the text rather than spanning the screen, so "town" is not a full bar. */
-    int height = lines * line_height + 5;
-    int width = widest + 6;
-    int left = (screen->width - width) / 2;
-    int top = screen->height - height - 3;
-
-    pntr_draw_rectangle_fill(screen, left, top, width, height, PNTR_BLACK);
-    WrapText(screen, state->font, state->message, left + 3, top + 3, max_width, NULL);
-  }
-}
-
-/*--------------------------------------------------------------------------------------------
- * pntr_app glue
- *------------------------------------------------------------------------------------------*/
-
-/*
- * This hook has to exist even though it does nothing.
- *
- * tinyengine polls input -- pntr_app_key_down() reads the app's keysDown[] array -- and that
- * array is only ever maintained by pntr_app_process_event(). On the web backend the key
- * handler opens with `if (app == NULL || app->event == NULL) return EM_FALSE;`, so leaving
- * `event` unset drops every keystroke before it can reach keysDown[], and the game runs but
- * never responds. The desktop backends read the keyboard directly and do not care.
- */
-void Event(pntr_app* app, pntr_app_event* event) {
-  (void)app;
-  (void)event;
+  snprintf(line, sizeof(line), "%s  %d", game->map->name, score);
+  pntr_draw_text(screen, game->font, line, 3, 3, PNTR_BLACK);
+  pntr_draw_text(screen, game->font, line, 2, 2, PNTR_WHITE);
 }
 
 static const tiny_game_def DEMO = {
@@ -480,269 +311,24 @@ static const tiny_game_def DEMO = {
     .sounds = TINY_SOUNDS,
     .sound_count = TINY_SOUND_COUNT,
     .object = Behaviour,
-    .enter = Enter,
-    .leave = NULL,
-    .draw = Overlay};
-
-typedef struct AppData {
-  tiny_game* game;
-  DemoState state;
-} AppData;
-
-/*--------------------------------------------------------------------------------------------
- * Audio output.
- *
- * tinyengine mixes mono int16 at TINY_AUDIO_RATE and hands it over with tiny_audio_render().
- * Everything below is the sink -- the only part that knows what hardware exists. Swapping a
- * target means replacing one of these blocks and nothing else in the engine or the game.
- *------------------------------------------------------------------------------------------*/
-
-#if defined(DEMO_HEADLESS) || \
-    !(defined(PNTR_APP_RAYLIB) || defined(PNTR_APP_WEB) || defined(PNTR_APP_ESP32))
-/* No device, or running headless. The mixer still works; the samples just go nowhere. */
-static void AudioInit(tiny_game* game) { (void)game; }
-static void AudioPump(tiny_game* game, float dt) {
-  (void)game;
-  (void)dt;
-}
-static void AudioClose(void) {}
-
-#elif defined(PNTR_APP_RAYLIB)
-/*
- * raylib's buffer-push API (UpdateAudioStream) writes a whole sub-buffer at a time and zero
- * pads the rest, and its sub-buffer size is `max(default, device period)`, which differs
- * per machine. Pushing anything short of that chops the audio into silence-gaps and sounds
- * like heavy distortion. The stream callback avoids the whole problem: raylib asks for an
- * exact frame count whenever it needs one.
- *
- * That callback runs on the audio thread, so it must not touch engine state while the game
- * thread is updating it. So the game thread renders into a small ring and the callback only
- * drains it. One producer, one consumer, no locks.
- */
-#define AUDIO_BLOCK 1024 /* frames rendered per pass */
-#define AUDIO_RING 4096  /* power of two, comfortably more than a device period */
-#define AUDIO_PREFILL (AUDIO_BLOCK * 2)
-
-static AudioStream audio_stream;
-static bool audio_ready;
-static int16_t audio_ring[AUDIO_RING];
-static int16_t audio_scratch[AUDIO_BLOCK];
-static volatile uint32_t audio_head; /* written by the game thread */
-static volatile uint32_t audio_tail; /* written by the audio thread */
-
-static void AudioFill(void* buffer, unsigned int frames) {
-  int16_t* out = (int16_t*)buffer;
-  /* The head is only ever advanced, so this stays correct across uint32 wrap. */
-  uint32_t available = audio_head - audio_tail;
-#if defined(__GNUC__)
-  __sync_synchronize();
-#endif
-  uint32_t count = frames < available ? frames : available;
-  for (uint32_t i = 0; i < count; i++) {
-    out[i] = audio_ring[(audio_tail + i) & (AUDIO_RING - 1)];
-  }
-  for (unsigned int i = count; i < frames; i++) {
-    out[i] = 0;
-  }
-  audio_tail += count;
-}
-
-static void AudioInit(tiny_game* game) {
-  (void)game;
-  audio_stream = LoadAudioStream(TINY_AUDIO_RATE, 16, 1);
-  /* raylib no-ops on an invalid stream, so there is nothing to test here. */
-  audio_ready = true;
-  SetAudioStreamCallback(audio_stream, AudioFill);
-  PlayAudioStream(audio_stream);
-}
-
-static void AudioPump(tiny_game* game, float dt) {
-  (void)dt;
-  if (!audio_ready) {
-    return;
-  }
-  /* Top the ring up to the prefill, and no further: bounded work per frame, bounded latency. */
-  uint32_t buffered = audio_head - audio_tail;
-  uint32_t want = AUDIO_PREFILL > buffered ? AUDIO_PREFILL - buffered : 0;
-  while (want > 0) {
-    uint32_t chunk = want < AUDIO_BLOCK ? want : AUDIO_BLOCK;
-    tiny_audio_render(game, audio_scratch, (int)chunk);
-    for (uint32_t i = 0; i < chunk; i++) {
-      audio_ring[(audio_head + i) & (AUDIO_RING - 1)] = audio_scratch[i];
-    }
-#if defined(__GNUC__)
-    __sync_synchronize();
-#endif
-    audio_head += chunk;
-    want -= chunk;
-  }
-}
-
-static void AudioClose(void) {
-  if (audio_ready) {
-    StopAudioStream(audio_stream);
-    UnloadAudioStream(audio_stream);
-  }
-  audio_ready = false;
-}
-
-#elif defined(PNTR_APP_WEB)
-#include <emscripten.h>
-
-/*
- * A ScriptProcessorNode pulls a block from the engine on every audio callback. JavaScript is
- * single threaded, so this can never run in the middle of a C frame -- which is exactly why
- * the engine can be a plain render function with no locking. Browsers start the context
- * suspended until a gesture, so a one-shot handler resumes it on the first key or click.
- *
- * The context is asked for the engine's rate, but a browser may refuse and give its own
- * (usually 48000). Feeding 22050 samples into a 48000 context plays them ~2x fast -- which
- * sounds high pitched and wrong -- so the sink resamples from ctx.sampleRate to the engine
- * rate whenever the two disagree. At the requested rate the ratio is 1 and this is a copy.
- */
-EM_JS(void, demo_audio_open, (int rate), {
-  var ctx = new(window.AudioContext || window.webkitAudioContext)({sampleRate : rate});
-  var step = rate / ctx.sampleRate; /* engine frames per output frame */
-  var node = ctx.createScriptProcessor(2048, 0, 1);
-  node.onaudioprocess = function(event) {
-    var out = event.outputBuffer.getChannelData(0);
-    var frames = out.length;
-    /* One engine sample past the last needed output frame, so the interpolation has a pair. */
-    var need = Math.ceil(frames * step) + 1;
-    var ptr = _demo_audio_buffer();
-    _demo_audio_fill(need);
-    var heap = Module['HEAP16'] || HEAP16;
-    var base = ptr >> 1;
-    for (var i = 0; i < frames; i++) {
-      var position = i * step;
-      var index = position | 0;
-      var frac = position - index;
-      var a = heap[base + index];
-      var b = heap[base + index + 1];
-      out[i] = (a + (b - a) * frac) / 32768.0;
-    }
-  };
-  var source = ctx.createBufferSource();
-  source.connect(node);
-  node.connect(ctx.destination);
-  source.start(0);
-  document.addEventListener('keydown', function() { ctx.resume(); }, {once : true});
-  document.addEventListener('pointerdown', function() { ctx.resume(); }, {once : true});
-});
-
-/* Big enough for a worst-case low-rate context: 2048 output frames at 8000Hz wants 5645. */
-#define WEB_AUDIO_BUFFER 8192
-static int16_t web_audio_buffer[WEB_AUDIO_BUFFER];
-static tiny_game* web_game;
-
-EMSCRIPTEN_KEEPALIVE int16_t* demo_audio_buffer(void) { return web_audio_buffer; }
-
-EMSCRIPTEN_KEEPALIVE void demo_audio_fill(int frames) {
-  if (frames > (int)(sizeof(web_audio_buffer) / sizeof(web_audio_buffer[0]))) {
-    frames = (int)(sizeof(web_audio_buffer) / sizeof(web_audio_buffer[0]));
-  }
-  tiny_audio_render(web_game, web_audio_buffer, frames);
-}
-
-static void AudioInit(tiny_game* game) {
-  web_game = game;
-  demo_audio_open(TINY_AUDIO_RATE);
-}
-
-static void AudioPump(tiny_game* game, float dt) {
-  (void)game;
-  (void)dt;
-}
-static void AudioClose(void) {}
-
-#elif defined(PNTR_APP_ESP32)
-/*
- * The CYD's speaker port is a plain GPIO DAC, so this bit-bangs it from its own task. The
- * pacing is the sample count, because Arduino's tick is far coarser than one audio block.
- */
-#include <Arduino.h>
-
-#define TINY_SPEAKER_PIN 26
-#define AUDIO_BLOCK 256
-
-static tiny_game* esp_game;
-static TaskHandle_t audio_task_handle;
-
-static void AudioTask(void* argument) {
-  (void)argument;
-  int16_t block[AUDIO_BLOCK];
-  for (;;) {
-    tiny_audio_render(esp_game, block, AUDIO_BLOCK);
-    for (int i = 0; i < AUDIO_BLOCK; i++) {
-      dacWrite(TINY_SPEAKER_PIN, (uint8_t)((block[i] >> 8) + 128));
-    }
-    delayMicroseconds(1000000 * AUDIO_BLOCK / TINY_AUDIO_RATE);
-  }
-}
-
-static void AudioInit(tiny_game* game) {
-  esp_game = game;
-  xTaskCreatePinnedToCore(AudioTask, "tiny_audio", 4096, NULL, 1, &audio_task_handle, 1);
-}
-
-static void AudioPump(tiny_game* game, float dt) {
-  (void)game;
-  (void)dt;
-}
-
-static void AudioClose(void) {
-  if (audio_task_handle != NULL) {
-    vTaskDelete(audio_task_handle);
-    audio_task_handle = NULL;
-  }
-}
-
-#endif
+    .draw = Hud};
 
 bool Init(pntr_app* app) {
-  AppData* data = (AppData*)pntr_load_memory(sizeof(AppData));
-  if (data == NULL) {
-    return false;
-  }
-  memset(data, 0, sizeof(AppData));
-  pntr_app_set_userdata(app, data);
-
-  data->state.font = pntr_load_font_default();
-
-  data->game = tiny_init(app, &DEMO, &data->state);
-  if (data->game == NULL) {
-    return false;
-  }
-  AudioInit(data->game);
-  return true;
+  tiny_game* game = tiny_init(app, &DEMO, NULL);
+  pntr_app_set_userdata(app, game);
+  tiny_sound_play(game, "theme", true);
+  return game != NULL;
 }
 
 bool Update(pntr_app* app, pntr_image* screen) {
-  AppData* data = (AppData*)pntr_app_userdata(app);
-  float dt = pntr_app_delta_time(app);
-  if (dt > 0.05f) {
-    dt = 0.05f; /* A long stall should not teleport anything through a wall. */
-  }
-
-  if (data->state.message_timer > 0.0f) {
-    data->state.message_timer -= dt;
-  }
-
-  tiny_update(data->game, dt);
-  tiny_draw(data->game, screen);
-  AudioPump(data->game, dt);
+  tiny_game* game = (tiny_game*)pntr_app_userdata(app);
+  tiny_update(game, pntr_app_delta_time(app));
+  tiny_draw(game, screen);
   return true;
 }
 
 void Close(pntr_app* app) {
-  AppData* data = (AppData*)pntr_app_userdata(app);
-  if (data == NULL) {
-    return;
-  }
-  AudioClose();
-  tiny_unload(data->game);
-  pntr_unload_font(data->state.font);
-  pntr_unload_memory(data);
+  tiny_unload((tiny_game*)pntr_app_userdata(app));
 }
 
 pntr_app Main(int argc, char* argv[]) {
@@ -755,6 +341,5 @@ pntr_app Main(int argc, char* argv[]) {
       .init = Init,
       .update = Update,
       .close = Close,
-      .event = Event,
       .fps = 60};
 }

@@ -8,7 +8,7 @@
 #include "tinyengine.h"
 
 static const tiny_prop tiny_ledge_layer0_props[] = {
-  { .name = "collision", .hash = 0x2176DB8FU, .type = 2, .as = { .i = 0 } },
+  { .name = "collision", .hash = 0x2176DB8FU, .type = 2, .as = { .i = 1 } },
 };
 
 static const tiny_prop tiny_ledge_layer1_props[] = {
@@ -56,7 +56,7 @@ static const uint16_t tiny_ledge_layer1[1500] = {
 
 static const tiny_layer tiny_ledge_layers[3] = {
   { .name = "sky", .hash = 0xCD2B8F36U, .kind = TINY_LAYER_TILE, .visible = true, .sort = false,
-    .collision = false, .width = 100, .height = 15, .offset_x = 0.0f, .offset_y = 0.0f,
+    .collision = true, .width = 100, .height = 15, .offset_x = 0.0f, .offset_y = 0.0f,
     .parallax_x = 1.0f, .parallax_y = 1.0f, .tiles = tiny_ledge_layer0,
     .props = { .items = tiny_ledge_layer0_props, .count = 1 } },
   { .name = "solid", .hash = 0xB1407AF4U, .kind = TINY_LAYER_TILE, .visible = true, .sort = false,
@@ -72,11 +72,13 @@ static const tiny_layer tiny_ledge_layers[3] = {
 static const tiny_prop tiny_ledge_obj3_props[] = {
   { .name = "destination", .hash = 0xB2DE64BFU, .type = 3, .as = { .s = "town" } },
   { .name = "spawn", .hash = 0x3A224D98U, .type = 3, .as = { .s = "from_ledge" } },
+  { .name = "sound", .hash = 0x0E0D9594U, .type = 3, .as = { .s = "blip" } },
 };
 
 static const tiny_prop tiny_ledge_obj4_props[] = {
   { .name = "destination", .hash = 0xB2DE64BFU, .type = 3, .as = { .s = "sky" } },
   { .name = "spawn", .hash = 0x3A224D98U, .type = 3, .as = { .s = "from_ledge" } },
+  { .name = "sound", .hash = 0x0E0D9594U, .type = 3, .as = { .s = "blip" } },
 };
 
 static const tiny_prop tiny_ledge_obj5_props[] = {
@@ -120,11 +122,11 @@ static const tiny_object_def tiny_ledge_objects[18] = {
   { .name = "back", .type = "portal", .name_hash = 0x5BB421A2U, .type_hash = 0x150C5D8BU, .id = 29,
     .x = 16.0f, .y = 96.0f, .w = 8.0f, .h = 8.0f,
     .tile = 0, .shape = TINY_SHAPE_RECT, .layer = 2, .visible = true,
-    .props = { .items = tiny_ledge_obj3_props, .count = 2 } },
+    .props = { .items = tiny_ledge_obj3_props, .count = 3 } },
   { .name = "onward", .type = "portal", .name_hash = 0x27593F5AU, .type_hash = 0x150C5D8BU, .id = 30,
     .x = 776.0f, .y = 96.0f, .w = 8.0f, .h = 8.0f,
     .tile = 0, .shape = TINY_SHAPE_RECT, .layer = 2, .visible = true,
-    .props = { .items = tiny_ledge_obj4_props, .count = 2 } },
+    .props = { .items = tiny_ledge_obj4_props, .count = 3 } },
   { .name = "goomba0", .type = "enemy", .name_hash = 0xB38BD262U, .type_hash = 0x69EA6DABU, .id = 31,
     .x = 112.0f, .y = 64.0f, .w = 8.0f, .h = 8.0f,
     .tile = 19, .shape = TINY_SHAPE_TILE, .layer = 2, .visible = true,

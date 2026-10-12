@@ -668,7 +668,7 @@ class BakedSound:
       self.bits = 0
       self.rate = 0
     elif ext in SOUND_SFX:
-      # rFXGen .sfs files are an 8 byte header and then the 96 byte SfxParams payload.
+      # rFXGen .rfx files (and older .sfs ones) are an 8 byte header and a 96 byte SfxParams.
       payload = raw[-SFX_PARAMS_BYTES:] if len(raw) > SFX_PARAMS_BYTES else raw
       if len(payload) != SFX_PARAMS_BYTES:
         die('sound %s is %d bytes; expected a %d byte SfxParams payload'
@@ -1065,7 +1065,7 @@ def main():
   parser.add_argument('maps', nargs='+', help='Tiled JSON maps (.tmj or .json)')
   parser.add_argument('-o', '--output', required=True, help='directory to write the headers into')
   parser.add_argument('--sounds', nargs='*', default=[], metavar='FILE',
-                      help='sound files (or globs): .wav, .mod, .sfs')
+                      help='sound files (or globs): .wav, .mod, .rfx')
   parser.add_argument('--sound-rate', type=int, default=22050, metavar='HZ',
                       help='rate to bake WAV audio at (default: 22050, what the mixer plays)')
   parser.add_argument('--format', choices=('rgba', 'argb'), default='rgba',

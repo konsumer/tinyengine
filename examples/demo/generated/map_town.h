@@ -142,21 +142,25 @@ static const tiny_prop tiny_town_obj1_props[] = {
 static const tiny_prop tiny_town_obj2_props[] = {
   { .name = "destination", .hash = 0xB2DE64BFU, .type = 3, .as = { .s = "cave" } },
   { .name = "spawn", .hash = 0x3A224D98U, .type = 3, .as = { .s = "from_town" } },
+  { .name = "sound", .hash = 0x0E0D9594U, .type = 3, .as = { .s = "blip" } },
 };
 
 static const tiny_prop tiny_town_obj4_props[] = {
   { .name = "destination", .hash = 0xB2DE64BFU, .type = 3, .as = { .s = "ledge" } },
   { .name = "spawn", .hash = 0x3A224D98U, .type = 3, .as = { .s = "from_town" } },
+  { .name = "sound", .hash = 0x0E0D9594U, .type = 3, .as = { .s = "blip" } },
 };
 
 static const tiny_prop tiny_town_obj6_props[] = {
   { .name = "destination", .hash = 0xB2DE64BFU, .type = 3, .as = { .s = "arena" } },
   { .name = "spawn", .hash = 0x3A224D98U, .type = 3, .as = { .s = "from_town" } },
+  { .name = "sound", .hash = 0x0E0D9594U, .type = 3, .as = { .s = "blip" } },
 };
 
 static const tiny_prop tiny_town_obj8_props[] = {
   { .name = "destination", .hash = 0xB2DE64BFU, .type = 3, .as = { .s = "pyramid" } },
   { .name = "spawn", .hash = 0x3A224D98U, .type = 3, .as = { .s = "from_town" } },
+  { .name = "sound", .hash = 0x0E0D9594U, .type = 3, .as = { .s = "blip" } },
 };
 
 static const tiny_object_def tiny_town_objects[14] = {
@@ -171,7 +175,7 @@ static const tiny_object_def tiny_town_objects[14] = {
   { .name = "cave_door", .type = "portal", .name_hash = 0x87B46269U, .type_hash = 0x150C5D8BU, .id = 4,
     .x = 16.0f, .y = 104.0f, .w = 8.0f, .h = 8.0f,
     .tile = 0, .shape = TINY_SHAPE_RECT, .layer = 2, .visible = true,
-    .props = { .items = tiny_town_obj2_props, .count = 2 } },
+    .props = { .items = tiny_town_obj2_props, .count = 3 } },
   { .name = "from_cave", .type = "spawn", .name_hash = 0x1EB6BF6BU, .type_hash = 0x3A224D98U, .id = 5,
     .x = 24.0f, .y = 104.0f, .w = 0.0f, .h = 0.0f,
     .tile = 0, .shape = TINY_SHAPE_POINT, .layer = 2, .visible = true,
@@ -179,7 +183,7 @@ static const tiny_object_def tiny_town_objects[14] = {
   { .name = "ledge_door", .type = "portal", .name_hash = 0xEFF61A6BU, .type_hash = 0x150C5D8BU, .id = 6,
     .x = 296.0f, .y = 104.0f, .w = 8.0f, .h = 8.0f,
     .tile = 0, .shape = TINY_SHAPE_RECT, .layer = 2, .visible = true,
-    .props = { .items = tiny_town_obj4_props, .count = 2 } },
+    .props = { .items = tiny_town_obj4_props, .count = 3 } },
   { .name = "from_ledge", .type = "spawn", .name_hash = 0x4E5BE24FU, .type_hash = 0x3A224D98U, .id = 7,
     .x = 288.0f, .y = 104.0f, .w = 0.0f, .h = 0.0f,
     .tile = 0, .shape = TINY_SHAPE_POINT, .layer = 2, .visible = true,
@@ -187,7 +191,7 @@ static const tiny_object_def tiny_town_objects[14] = {
   { .name = "arena_door", .type = "portal", .name_hash = 0xB7E8E019U, .type_hash = 0x150C5D8BU, .id = 8,
     .x = 152.0f, .y = 16.0f, .w = 8.0f, .h = 8.0f,
     .tile = 0, .shape = TINY_SHAPE_RECT, .layer = 2, .visible = true,
-    .props = { .items = tiny_town_obj6_props, .count = 2 } },
+    .props = { .items = tiny_town_obj6_props, .count = 3 } },
   { .name = "from_arena", .type = "spawn", .name_hash = 0xB6189679U, .type_hash = 0x3A224D98U, .id = 9,
     .x = 152.0f, .y = 24.0f, .w = 0.0f, .h = 0.0f,
     .tile = 0, .shape = TINY_SHAPE_POINT, .layer = 2, .visible = true,
@@ -195,7 +199,7 @@ static const tiny_object_def tiny_town_objects[14] = {
   { .name = "pyramid_door", .type = "portal", .name_hash = 0xA8CD77F8U, .type_hash = 0x150C5D8BU, .id = 10,
     .x = 152.0f, .y = 216.0f, .w = 8.0f, .h = 8.0f,
     .tile = 0, .shape = TINY_SHAPE_RECT, .layer = 2, .visible = true,
-    .props = { .items = tiny_town_obj8_props, .count = 2 } },
+    .props = { .items = tiny_town_obj8_props, .count = 3 } },
   { .name = "from_pyramid", .type = "spawn", .name_hash = 0x27B84C7AU, .type_hash = 0x3A224D98U, .id = 11,
     .x = 152.0f, .y = 208.0f, .w = 0.0f, .h = 0.0f,
     .tile = 0, .shape = TINY_SHAPE_POINT, .layer = 2, .visible = true,

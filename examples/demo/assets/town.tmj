@@ -2500,6 +2500,11 @@
        "name": "spawn",
        "type": "string",
        "value": "from_town"
+      },
+      {
+       "name": "sound",
+       "type": "string",
+       "value": "blip"
       }
      ]
     },
@@ -2535,6 +2540,11 @@
        "name": "spawn",
        "type": "string",
        "value": "from_town"
+      },
+      {
+       "name": "sound",
+       "type": "string",
+       "value": "blip"
       }
      ]
     },
@@ -2570,6 +2580,11 @@
        "name": "spawn",
        "type": "string",
        "value": "from_town"
+      },
+      {
+       "name": "sound",
+       "type": "string",
+       "value": "blip"
       }
      ]
     },
@@ -2605,6 +2620,11 @@
        "name": "spawn",
        "type": "string",
        "value": "from_town"
+      },
+      {
+       "name": "sound",
+       "type": "string",
+       "value": "blip"
       }
      ]
     },

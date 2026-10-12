@@ -1850,7 +1850,7 @@
    "name": "things",
    "objects": [
     {
-     "id": 93,
+     "id": 82,
      "name": "player",
      "type": "player",
      "rotation": 0,
@@ -1862,7 +1862,7 @@
      "gid": 25
     },
     {
-     "id": 94,
+     "id": 83,
      "name": "from_ledge",
      "type": "spawn",
      "rotation": 0,
@@ -1874,7 +1874,7 @@
      "point": true
     },
     {
-     "id": 95,
+     "id": 84,
      "name": "back",
      "type": "portal",
      "rotation": 0,
@@ -1893,11 +1893,16 @@
        "name": "spawn",
        "type": "string",
        "value": "from_sky"
+      },
+      {
+       "name": "sound",
+       "type": "string",
+       "value": "blip"
       }
      ]
     },
     {
-     "id": 96,
+     "id": 85,
      "name": "drone0",
      "type": "enemy",
      "rotation": 0,
@@ -1916,7 +1921,7 @@
      ]
     },
     {
-     "id": 97,
+     "id": 86,
      "name": "drone1",
      "type": "enemy",
      "rotation": 0,
@@ -1935,7 +1940,7 @@
      ]
     },
     {
-     "id": 98,
+     "id": 87,
      "name": "drone2",
      "type": "enemy",
      "rotation": 0,
@@ -1954,7 +1959,7 @@
      ]
     },
     {
-     "id": 99,
+     "id": 88,
      "name": "drone3",
      "type": "enemy",
      "rotation": 0,
@@ -1973,7 +1978,7 @@
      ]
     },
     {
-     "id": 100,
+     "id": 89,
      "name": "drone4",
      "type": "enemy",
      "rotation": 0,
@@ -1992,7 +1997,7 @@
      ]
     },
     {
-     "id": 101,
+     "id": 90,
      "name": "drone5",
      "type": "enemy",
      "rotation": 0,
@@ -2011,7 +2016,7 @@
      ]
     },
     {
-     "id": 102,
+     "id": 91,
      "name": "pod0",
      "type": "coin",
      "rotation": 0,
@@ -2023,7 +2028,7 @@
      "gid": 29
     },
     {
-     "id": 103,
+     "id": 92,
      "name": "pod1",
      "type": "coin",
      "rotation": 0,
@@ -2035,7 +2040,7 @@
      "gid": 29
     },
     {
-     "id": 104,
+     "id": 93,
      "name": "pod2",
      "type": "coin",
      "rotation": 0,
@@ -2047,7 +2052,7 @@
      "gid": 29
     },
     {
-     "id": 105,
+     "id": 94,
      "name": "pod3",
      "type": "coin",
      "rotation": 0,
@@ -2074,7 +2079,7 @@
   }
  ],
  "nextlayerid": 4,
- "nextobjectid": 106,
+ "nextobjectid": 95,
  "orientation": "orthogonal",
  "properties": [
   {

@@ -2493,6 +2493,11 @@
        "name": "spawn",
        "type": "string",
        "value": "from_cave"
+      },
+      {
+       "name": "sound",
+       "type": "string",
+       "value": "blip"
       }
      ]
     },

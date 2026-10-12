@@ -5,7 +5,8 @@ set(DEMO_DIR ${CMAKE_CURRENT_SOURCE_DIR})
 # Emscripten for the web, raylib for the desktop. The game source is identical either way.
 if(EMSCRIPTEN)
     add_executable(demo ${DEMO_DIR}/demo.c)
-    target_compile_definitions(demo PRIVATE PNTR_APP_WEB)
+    # Phones play it too, so the on-screen controls appear once the screen is touched.
+    target_compile_definitions(demo PRIVATE PNTR_APP_WEB TINY_TOUCH_CONTROLS)
     target_link_libraries(demo PRIVATE pntr pntr_app tinyengine)
     set_target_properties(demo PROPERTIES SUFFIX ".html")
     target_link_options(demo PRIVATE

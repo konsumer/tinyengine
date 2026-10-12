@@ -163,13 +163,13 @@ int main(int argc, char* argv[]) {
     return 1;
   }
 
-  AppData* data = (AppData*)app.userData;
+  tiny_game* game = (tiny_game*)app.userData;
   if (map_name != NULL) {
-    if (!tiny_goto_map(data->game, map_name, NULL)) {
+    if (!tiny_goto_map(game, map_name, NULL)) {
       return 1;
     }
     /* The switch is deferred to the end of a frame, so spend one getting there. */
-    tiny_update(data->game, 0.0f);
+    tiny_update(game, 0.0f);
   }
 
   /* Hold the requested keys for the whole run, which is enough to exercise movement. */
@@ -198,7 +198,6 @@ int main(int argc, char* argv[]) {
    * Walking the objects through the public API is half the point of this tool: it is the
    * same loop a game writes, so it fails here if that ever stops working.
    */
-  tiny_game* game = data->game;
   int alive = 0;
   int drawn = 0;
   for (int i = 0; i < tiny_object_count(game); i++) {
@@ -264,9 +263,9 @@ int main(int argc, char* argv[]) {
   }
 
   /*
-   * Audio smoke. The mixer is the engine's job, so prove it actually makes noise: a one-shot
-   * WAV has to reach the output and then stop, a MOD has to keep looping, and a synthesised
-   * SFX has to come out of pntr_app_sfx. Silence here means a whole subsystem is wired wrong.
+   * Audio smoke. The mixer is the engine's job, so prove it actually makes noise: a MOD has
+   * to keep looping, and a one-shot SFX has to come out of pntr_app_sfx, reach the output and
+   * then stop. Silence here means a whole subsystem is wired wrong.
    */
   int16_t audio[512];
   long loud = 0;
@@ -290,7 +289,7 @@ int main(int argc, char* argv[]) {
     return 1;
   }
   if (tiny_sound_playing(game, "coin")) {
-    fprintf(stderr, "tiny_preview: the one-shot WAV never stopped\n");
+    fprintf(stderr, "tiny_preview: the one-shot SFX never stopped\n");
     return 1;
   }
   printf("tiny_preview: audio -- %ld non-silent samples, theme looping, coin one-shot done\n", loud);
